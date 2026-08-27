@@ -1,0 +1,373 @@
+schema_version: 1
+catalog: builtin_after_close
+rules:
+  - id: close_above_ma20
+    version: 1
+    name: 收盘站上 MA20
+    description: 判断收盘价是否高于 20 日均线，只用于观察短期结构。
+    kind: scored
+    group: trend_structure
+    group_label: 趋势结构
+    family: 均线位置
+    level: 基础
+    timeframe: day
+    lookback: 20
+    inputs: [close, ma20]
+    implementation: {type: expression, expression: "close > ma20"}
+    missing_policy: DATA_GAP
+    plain_template: 收盘价高于 20 日均线
+    status: ACTIVE
+    tests: [tests/test_signal_engine.py]
+
+  - id: close_above_ma60
+    version: 1
+    name: 收盘站上 MA60
+    description: 判断收盘价是否高于 60 日均线，避免只观察很短的反弹。
+    kind: scored
+    group: trend_structure
+    group_label: 趋势结构
+    family: 均线位置
+    level: 基础
+    timeframe: day
+    lookback: 60
+    inputs: [close, ma60]
+    implementation: {type: expression, expression: "close > ma60"}
+    missing_policy: DATA_GAP
+    plain_template: 收盘价高于 60 日均线
+    status: ACTIVE
+    tests: [tests/test_signal_engine.py]
+
+  - id: ma5_above_ma10
+    version: 1
+    name: MA5 不低于 MA10
+    description: 判断 5 日均线是否不低于 10 日均线，用于确认近期结构。
+    kind: scored
+    group: trend_structure
+    group_label: 趋势结构
+    family: 短期均线
+    level: 确认
+    timeframe: day
+    lookback: 10
+    inputs: [ma5, ma10]
+    implementation: {type: expression, expression: "ma5 >= ma10"}
+    missing_policy: DATA_GAP
+    plain_template: 5 日均线不低于 10 日均线
+    status: ACTIVE
+    tests: [tests/test_signal_engine.py]
+
+  - id: ma20_slope_positive
+    version: 1
+    name: MA20 方向向上
+    description: 判断 20 日均线相较三个交易日前是否上行。
+    kind: scored
+    group: trend_structure
+    group_label: 趋势结构
+    family: 短期均线
+    level: 确认
+    timeframe: day
+    lookback: 23
+    inputs: [ma20_slope]
+    implementation: {type: expression, expression: "ma20_slope > 0"}
+    missing_policy: DATA_GAP
+    plain_template: 20 日均线相较三个交易日前上行
+    status: ACTIVE
+    tests: [tests/test_signal_engine.py]
+
+  - id: ma20_above_ma60
+    version: 1
+    name: MA20 位于 MA60 上方
+    description: 判断中短期均线是否位于中期均线上方。
+    kind: scored
+    group: trend_structure
+    group_label: 趋势结构
+    family: 均线位置
+    level: 结构
+    timeframe: day
+    lookback: 60
+    inputs: [ma20, ma60]
+    implementation: {type: expression, expression: "ma20 >= ma60"}
+    missing_policy: DATA_GAP
+    plain_template: 20 日均线不低于 60 日均线
+    status: ACTIVE
+    tests: [tests/test_signal_engine.py]
+
+  - id: volume_ratio_above_1_3
+    version: 1
+    name: 成交量达到均量门槛
+    description: 判断当日成交量与 20 日均量之比是否达到事前设定门槛。
+    kind: scored
+    group: price_volume
+    group_label: 量价确认
+    family: 成交量强度
+    level: 确认
+    timeframe: day
+    lookback: 20
+    inputs: [volume_ratio]
+    params_schema:
+      volume_ratio_buy: {type: number, default: 1.3, min: 0.1, max: 10}
+    implementation: {type: expression, expression: "volume_ratio >= volume_ratio_buy"}
+    missing_policy: DATA_GAP
+    plain_template: 当日成交量达到 20 日均量的 {volume_ratio_buy} 倍
+    status: ACTIVE
+    tests: [tests/test_signal_engine.py]
+
+  - id: price_volume_confirmed
+    version: 1
+    name: 上涨得到量能确认
+    description: 判断当日收益为正且成交量不低于 20 日均量。
+    kind: scored
+    group: price_volume
+    group_label: 量价确认
+    family: 成交量强度
+    level: 确认
+    timeframe: day
+    lookback: 20
+    inputs: [ret_1d, volume_ratio]
+    implementation: {type: expression, expression: "all(ret_1d > 0, volume_ratio >= 1.0)"}
+    missing_policy: DATA_GAP
+    plain_template: 当日上涨且成交量不低于 20 日均量
+    status: ACTIVE
+    tests: [tests/test_signal_engine.py]
+
+  - id: volume_trend_positive
+    version: 1
+    name: 5 日均量不低于 20 日
+    description: 判断近期平均成交量是否不低于中期均量。
+    kind: scored
+    group: price_volume
+    group_label: 量价确认
+    family: 量能趋势
+    level: 结构
+    timeframe: day
+    lookback: 20
+    inputs: [vol_ma5, vol_ma20]
+    implementation: {type: expression, expression: "vol_ma5 >= vol_ma20"}
+    missing_policy: DATA_GAP
+    plain_template: 5 日均量不低于 20 日均量
+    status: ACTIVE
+    tests: [tests/test_signal_engine.py]
+
+  - id: obv_trend_positive
+    version: 1
+    name: OBV 十日方向向上
+    description: 判断能量潮相较十个交易日前是否上升。
+    kind: scored
+    group: price_volume
+    group_label: 量价确认
+    family: 量能趋势
+    level: 结构
+    timeframe: day
+    lookback: 11
+    inputs: [obv_slope_10]
+    implementation: {type: expression, expression: "obv_slope_10 > 0"}
+    missing_policy: DATA_GAP
+    plain_template: OBV 相较十个交易日前上升
+    status: ACTIVE
+    tests: [tests/test_signal_engine.py]
+
+  - id: close_near_high_with_volume
+    version: 1
+    name: 放量接近 20 日高位
+    description: 判断收盘距 20 日高点不超过 3% 且量比不低于 1.2。
+    kind: scored
+    group: price_volume
+    group_label: 量价确认
+    family: 成交量强度
+    level: 强化
+    timeframe: day
+    lookback: 20
+    inputs: [close, high_20, volume_ratio]
+    implementation: {type: expression, expression: "all(close >= high_20 * 0.97, volume_ratio >= 1.2)"}
+    missing_policy: DATA_GAP
+    plain_template: 收盘接近 20 日高位且量比不低于 1.2
+    status: ACTIVE
+    tests: [tests/test_signal_engine.py]
+
+  - id: macd_hist_positive
+    version: 1
+    name: MACD 柱为正
+    description: 判断 MACD 柱是否位于零轴上方，只描述当前动能状态。
+    kind: scored
+    group: momentum
+    group_label: 动能
+    family: MACD
+    level: 基础
+    timeframe: day
+    lookback: 35
+    inputs: [macd_hist]
+    implementation: {type: expression, expression: "macd_hist > 0"}
+    missing_policy: DATA_GAP
+    plain_template: MACD 柱位于零轴上方
+    status: ACTIVE
+    tests: [tests/test_signal_engine.py]
+
+  - id: macd_hist_improving
+    version: 1
+    name: MACD 柱继续改善
+    description: 判断 MACD 柱是否高于上一有效交易日。
+    kind: scored
+    group: momentum
+    group_label: 动能
+    family: MACD
+    level: 确认
+    timeframe: day
+    lookback: 36
+    inputs: [macd_hist]
+    implementation: {type: expression, expression: "macd_hist > prev(macd_hist, 1)"}
+    missing_policy: DATA_GAP
+    plain_template: MACD 柱高于上一有效交易日
+    status: ACTIVE
+    tests: [tests/test_signal_engine.py]
+
+  - id: rsi_healthy
+    version: 1
+    name: RSI 位于健康区间
+    description: 判断 RSI 是否位于事前设定的区间，避免过弱或过热。
+    kind: scored
+    group: momentum
+    group_label: 动能
+    family: RSI
+    level: 保护
+    timeframe: day
+    lookback: 14
+    inputs: [rsi14]
+    params_schema:
+      rsi_low: {type: number, default: 45, min: 0, max: 100}
+      rsi_high: {type: number, default: 70, min: 0, max: 100}
+    implementation: {type: expression, expression: "between(rsi14, rsi_low, rsi_high)"}
+    missing_policy: DATA_GAP
+    plain_template: RSI 位于 {rsi_low} 到 {rsi_high} 区间
+    status: ACTIVE
+    tests: [tests/test_signal_engine.py]
+
+  - id: rsi_improving
+    version: 1
+    name: RSI 较前一日改善
+    description: 判断 RSI 是否高于上一交易日且未进入过热区。
+    kind: scored
+    group: momentum
+    group_label: 动能
+    family: RSI
+    level: 确认
+    timeframe: day
+    lookback: 15
+    inputs: [rsi14]
+    params_schema:
+      rsi_overbought: {type: number, default: 75, min: 0, max: 100}
+    implementation: {type: expression, expression: "all(rsi14 > prev(rsi14, 1), rsi14 <= rsi_overbought)"}
+    missing_policy: DATA_GAP
+    plain_template: RSI 高于上一交易日且不高于 {rsi_overbought}
+    status: ACTIVE
+    tests: [tests/test_signal_engine.py]
+
+  - id: roc20_positive
+    version: 1
+    name: 20 日价格动量为正
+    description: 判断收盘价相较 20 个交易日前是否为正收益。
+    kind: scored
+    group: momentum
+    group_label: 动能
+    family: 价格动能
+    level: 结构
+    timeframe: day
+    lookback: 21
+    inputs: [roc20]
+    implementation: {type: expression, expression: "roc20 > 0"}
+    missing_policy: DATA_GAP
+    plain_template: 20 日价格收益为正
+    status: ACTIVE
+    tests: [tests/test_signal_engine.py]
+
+  - id: not_over_extended
+    version: 1
+    name: 未明显偏离 MA20
+    description: 判断价格向上偏离 MA20 是否未超过事前设定上限。
+    kind: scored
+    group: location_risk
+    group_label: 位置与波动
+    family: 偏离保护
+    level: 保护
+    timeframe: day
+    lookback: 20
+    inputs: [distance_from_ma20]
+    params_schema:
+      extension_from_ma20_max: {type: number, default: 0.1, min: 0, max: 1}
+    implementation: {type: expression, expression: "distance_from_ma20 <= extension_from_ma20_max"}
+    missing_policy: DATA_GAP
+    plain_template: 价格向上偏离 MA20 不超过 {extension_from_ma20_max}
+    status: ACTIVE
+    tests: [tests/test_signal_engine.py]
+
+  - id: position_above_20d_mid
+    version: 1
+    name: 位于 20 日区间中位以上
+    description: 判断收盘价是否位于近 20 日高低区间的中位以上。
+    kind: scored
+    group: location_risk
+    group_label: 位置与波动
+    family: 区间位置
+    level: 基础
+    timeframe: day
+    lookback: 20
+    inputs: [close, high_20, low_20]
+    implementation: {type: expression, expression: "close >= (high_20 + low_20) / 2"}
+    missing_policy: DATA_GAP
+    plain_template: 收盘价位于 20 日区间中位以上
+    status: ACTIVE
+    tests: [tests/test_signal_engine.py]
+
+  - id: near_20d_high
+    version: 1
+    name: 距 20 日高点不超过 10%
+    description: 判断收盘价距近 20 日高点的回撤是否不超过 10%。
+    kind: scored
+    group: location_risk
+    group_label: 位置与波动
+    family: 区间位置
+    level: 确认
+    timeframe: day
+    lookback: 20
+    inputs: [drawdown_from_20d_high]
+    implementation: {type: expression, expression: "drawdown_from_20d_high >= -0.10"}
+    missing_policy: DATA_GAP
+    plain_template: 收盘价距 20 日高点的回撤不超过 10%
+    status: ACTIVE
+    tests: [tests/test_signal_engine.py]
+
+  - id: atr_not_high
+    version: 1
+    name: ATR 波动未过高
+    description: 判断 ATR 占价格比例是否未超过事前设定上限。
+    kind: scored
+    group: location_risk
+    group_label: 位置与波动
+    family: 波动保护
+    level: 保护
+    timeframe: day
+    lookback: 15
+    inputs: [atr_pct]
+    params_schema:
+      atr_risk_pct_high: {type: number, default: 0.05, min: 0.001, max: 1}
+    implementation: {type: expression, expression: "atr_pct <= atr_risk_pct_high"}
+    missing_policy: DATA_GAP
+    plain_template: ATR 占价格比例不超过 {atr_risk_pct_high}
+    status: ACTIVE
+    tests: [tests/test_signal_engine.py]
+
+  - id: gap_not_extreme
+    version: 1
+    name: 当日跳空不极端
+    description: 判断开盘相对前收盘的绝对跳空幅度是否不超过 3%。
+    kind: scored
+    group: location_risk
+    group_label: 位置与波动
+    family: 波动保护
+    level: 保护
+    timeframe: day
+    lookback: 2
+    inputs: [gap_pct]
+    implementation: {type: expression, expression: "abs(gap_pct) <= 0.03"}
+    missing_policy: DATA_GAP
+    plain_template: 开盘相对前收盘的绝对跳空幅度不超过 3%
+    status: ACTIVE
+    tests: [tests/test_signal_engine.py]

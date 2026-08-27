@@ -1,0 +1,2 @@
+# Optional. The core project and dashboard do not install this automatically.
+akshare>=1.18.64

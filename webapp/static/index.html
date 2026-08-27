@@ -1,0 +1,610 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#f7f4ed">
+  <title>收盘候选筛选</title>
+  <link rel="stylesheet" href="/styles.css?v=1.0.1">
+  <script src="/theme.js?v=1.0.1"></script>
+</head>
+<body data-app-version="web-v1.0.1">
+  <a class="skip-link" href="#appMain">跳到主要内容</a>
+
+  <header class="app-header">
+    <div class="header-inner">
+      <a class="brand" href="#screen" data-view-link="screen" aria-label="返回候选筛选">
+        <span class="brand-mark" aria-hidden="true">收</span>
+        <span>
+          <strong>收盘候选筛选</strong>
+          <small>本地数据 · 自定规则</small>
+        </span>
+      </a>
+
+      <nav class="main-nav" aria-label="主要功能">
+        <button class="nav-button is-active" id="screenNav" type="button" data-view="screen" aria-current="page">
+          <span aria-hidden="true">筛</span><strong>筛选</strong>
+        </button>
+        <button class="nav-button" id="rulesNav" type="button" data-view="rules">
+          <span aria-hidden="true">则</span><strong>规则</strong>
+        </button>
+        <button class="nav-button" id="recordsNav" type="button" data-view="records">
+          <span aria-hidden="true">记</span><strong>操作记录</strong>
+        </button>
+      </nav>
+
+      <div class="header-status-group">
+        <div class="header-status-row">
+          <button class="icon-button theme-toggle" id="themeToggleButton" type="button" aria-label="显示模式：跟随系统" title="显示模式：跟随系统">
+            <span class="theme-toggle-glyph" aria-hidden="true">◐</span>
+          </button>
+          <span class="release-badge" title="发布于 2026-08-27（Asia/Shanghai）">WEB V1.0.1 · 2026-08-27</span>
+        </div>
+        <div class="connection-status" id="connectionStatus" role="status" aria-live="polite">
+          <span aria-hidden="true"></span>
+          <strong>正在连接</strong>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <main class="app-main" id="appMain" tabindex="-1">
+    <section class="app-view" id="screenView" data-view-panel="screen" aria-labelledby="screenHeading">
+      <div class="page-shell">
+        <header class="page-header screen-page-header">
+          <div>
+            <h1 id="screenHeading" tabindex="-1">数据筛选</h1>
+            <p>候选只用于下一步观察，不是买卖指令。</p>
+          </div>
+        </header>
+
+        <section class="screen-workbench" aria-label="筛选准备与执行">
+          <article class="setup-card">
+            <div class="setup-card-copy">
+              <span>股票数据</span>
+              <strong id="dataDate">读取中</strong>
+              <small id="dataSummary">正在检查本地日线</small>
+            </div>
+            <button class="button button-secondary" id="openDataButton" type="button">管理数据</button>
+          </article>
+
+          <article class="setup-card">
+            <div class="setup-card-copy">
+              <span>筛选依据</span>
+              <strong id="activeRuleName">读取中</strong>
+              <small id="activeRuleSummary">正在检查当前规则</small>
+            </div>
+            <button class="button button-secondary" type="button" data-view="rules">编辑规则</button>
+          </article>
+
+          <section class="screen-action-card" aria-label="运行筛选">
+            <p id="screenFeedback" role="status" aria-live="polite" hidden></p>
+            <button class="button button-primary button-large" id="runScreeningButton" type="button" disabled>
+              按当前规则筛选
+            </button>
+          </section>
+        </section>
+
+        <section class="result-section" id="screenResult" aria-labelledby="candidateHeading">
+          <div class="section-heading">
+            <div>
+              <div class="result-title-row">
+                <h2 id="candidateHeading" tabindex="-1">筛选结果 <strong id="candidateCount">0</strong></h2>
+                <span class="result-freshness is-empty" id="screenResultFreshness" role="status" aria-live="polite">暂无结果</span>
+              </div>
+              <p class="screen-ranking-note" id="screenRankingNote" hidden>排序分仅表示本批次的相对技术排序，不代表上涨概率或操作许可。</p>
+            </div>
+            <div class="result-meta">
+              <p id="screenResultStats" hidden></p>
+              <p id="screenResultMeta">尚未运行筛选</p>
+            </div>
+          </div>
+
+          <div class="candidate-list" id="candidateList" role="list">
+            <div class="empty-state">
+              <strong>还没有筛选记录</strong>
+            </div>
+          </div>
+        </section>
+      </div>
+    </section>
+
+    <section class="app-view is-hidden" id="rulesView" data-view-panel="rules" aria-labelledby="rulesHeading">
+      <div class="page-shell page-shell-rules">
+        <header class="page-header">
+          <div>
+            <h1 id="rulesHeading" tabindex="-1">规则</h1>
+            <p>规则只决定候选怎么筛出来，不构成买卖指令。</p>
+          </div>
+        </header>
+
+        <div class="rules-surface-tabs" id="rulesSurfaceTabs" role="tablist" aria-label="规则页主视图">
+          <button type="button" role="tab" id="setsSurfaceTab" data-rules-surface-tab="sets" aria-controls="ruleSetsView" aria-selected="true">组合管理</button>
+          <button type="button" role="tab" id="librarySurfaceTab" data-rules-surface-tab="library" aria-controls="ruleLibraryView" aria-selected="false">规则库</button>
+        </div>
+
+        <section class="rules-surface" id="ruleSetsView" role="tabpanel" aria-labelledby="setsSurfaceTab">
+        <section class="editor-card rule-set-picker" aria-labelledby="ruleSetPickerHeading">
+          <div class="editor-heading">
+            <h2 id="ruleSetPickerHeading" class="sr-only" tabindex="-1">规则组合</h2>
+            <span class="rule-set-count" id="ruleSetCount">共 0 个组合</span>
+            <button class="button button-primary button-compact" id="newRuleSetButton" type="button">新建组合</button>
+          </div>
+          <div class="rule-set-list" id="ruleSetList" role="list" aria-label="规则组合列表" aria-busy="false">
+            <p class="loading-copy">正在读取规则组合…</p>
+          </div>
+          <div class="rule-recovery-bar">
+            <p class="form-feedback rule-set-list-feedback" id="ruleSetListFeedback" role="status" aria-live="polite" hidden></p>
+            <button class="button button-secondary button-compact" id="resetRulesButton" type="button" hidden>重新载入并核对</button>
+          </div>
+        </section>
+        </section>
+
+        <section class="rules-surface" id="ruleEditorView" aria-labelledby="enabledRulesHeading" hidden>
+          <nav class="rules-crumb" aria-label="返回组合管理">
+            <button class="rules-crumb-back" id="ruleEditorBackButton" type="button">返回组合</button>
+            <span id="ruleEditorCrumb">规则 / 组合管理 / 编辑组合</span>
+          </nav>
+          <form class="rule-editor rule-set-editor rule-set-detail" id="ruleEditorForm" hidden>
+            <div class="rule-workspace">
+              <section class="rule-detail-body" aria-labelledby="enabledRulesHeading">
+              <div class="editor-heading">
+                <div>
+                  <h2 id="enabledRulesHeading" tabindex="-1">编辑组合</h2>
+                </div>
+              </div>
+              <div class="rule-set-fields">
+                <label class="field-stack">
+                  <span>组合名称</span>
+                  <input id="ruleSetName" type="text" maxlength="80" autocomplete="off" required>
+                </label>
+              </div>
+              <div class="rule-stage-columns">
+                <section class="rule-stage-editor is-active" data-rule-stage-panel="primary" aria-labelledby="primaryRulesHeading">
+                  <header><div><h3 id="primaryRulesHeading"><span class="stage-index" aria-hidden="true">01</span>一级筛选</h3><small id="primaryRulesSummary">所选规则全部满足</small></div><div class="rule-stage-header-actions"><strong class="count-pill" id="primaryRuleCount">0 条</strong><button class="button button-secondary button-compact rule-stage-add-button" type="button" data-stage-add="primary" hidden>从规则库选择</button></div></header>
+                  <div class="rule-list" id="ruleList" role="group" aria-label="一级筛选规则">
+                    <p class="loading-copy">请选择或新建一个组合。</p>
+                  </div>
+                </section>
+                <section class="rule-stage-editor" data-rule-stage-panel="secondary" aria-labelledby="secondaryRulesHeading">
+                  <header><div><h3 id="secondaryRulesHeading"><span class="stage-index" aria-hidden="true">02</span>二级筛选 <small>可选</small></h3><small id="secondaryRulesSummary">一级通过后，所选规则全部满足</small></div><div class="rule-stage-header-actions"><strong class="count-pill" id="secondaryRuleCount">0 条</strong><button class="button button-secondary button-compact rule-stage-add-button" type="button" data-stage-add="secondary" hidden>从规则库选择</button></div></header>
+                  <div class="rule-list" id="secondaryRuleList" role="group" aria-label="二级筛选规则">
+                    <p class="empty-inline">未添加二级规则，一级通过后直接进入排序。</p>
+                  </div>
+                </section>
+              </div>
+              </section>
+
+              <footer class="rule-save-panel" aria-label="组合操作">
+                <div class="form-feedback" id="ruleFeedback" role="status" aria-live="polite" hidden></div>
+                <div class="form-actions rule-set-actions">
+                  <button class="button button-secondary" id="cancelRuleEditButton" type="button">取消</button>
+                  <button class="button button-primary" id="saveRulesButton" type="submit" disabled>保存组合</button>
+                </div>
+              </footer>
+            </div>
+          </form>
+        </section>
+
+        <section class="rules-surface" id="ruleLibraryView" role="tabpanel" aria-labelledby="librarySurfaceTab" hidden>
+          <nav class="rules-crumb" id="rulePickerCrumb" aria-label="取消选择并返回编辑组合" hidden>
+            <button class="rules-crumb-back" id="rulePickerCancelButton" type="button">取消选择</button>
+            <span id="rulePickerTitle" tabindex="-1">选择一级规则</span>
+          </nav>
+        <section class="editor-card rule-library" id="ruleLibraryPanel">
+          <div class="rule-library-main-summary sr-only"><span><strong id="ruleLibraryHeading" tabindex="-1">规则库</strong><small id="ruleLibraryIntro">浏览或新增规则不会改变任何组合。</small></span></div>
+          <div class="rule-library-body">
+          <label class="rule-search" for="ruleSearchInput">
+            <span class="sr-only">搜索规则</span>
+            <input id="ruleSearchInput" type="search" placeholder="搜索名称、说明、表达式或指标" autocomplete="off">
+          </label>
+          <div class="rule-library-tools">
+            <button class="button button-secondary button-compact" id="importDefaultRulesButton" type="button" hidden>导入默认规则</button>
+            <button class="button button-secondary button-compact" id="addRuleTagButton" type="button" hidden>新建标签</button>
+            <button class="button button-secondary button-compact" id="manageLibraryButton" type="button" aria-pressed="false">管理</button>
+            <button class="button button-primary button-compact" id="addRuleButton" type="button">新增规则</button>
+          </div>
+          <p class="editor-note" id="ruleSearchSummary" role="status" aria-live="polite"></p>
+
+          <section class="rule-library-section" aria-labelledby="ruleLibraryHeading">
+            <div class="rule-library-section-heading">
+              <p class="form-feedback" id="customRuleFeedback" role="status" aria-live="polite" hidden></p>
+              <strong class="count-pill" id="availableRuleCount">0 条</strong>
+            </div>
+            <div class="rule-library-groups" id="ruleLibraryGroups"></div>
+          </section>
+          </div>
+        </section>
+          <div class="rule-picker-bar" id="rulePickerBar" hidden>
+            <p id="rulePickerCount" role="status" aria-live="polite">已选择 0 条</p>
+            <button class="button button-primary" id="rulePickerConfirmButton" type="button" disabled>加入一级</button>
+          </div>
+        </section>
+      </div>
+    </section>
+
+
+    <section class="app-view is-hidden" id="recordsView" data-view-panel="records" aria-labelledby="recordsHeading">
+      <div class="page-shell">
+        <header class="page-header">
+          <div>
+            <h1 id="recordsHeading" tabindex="-1">操作记录</h1>
+            <p>只记录已经发生的买卖事实，不代表系统允许操作。</p>
+          </div>
+        </header>
+
+        <section class="records-surface" id="recordsHomeView">
+          <div class="section-heading records-home-heading">
+            <div>
+              <h2 id="recentRecordsHeading" tabindex="-1">历史记录 <strong id="recordCount">0</strong></h2>
+            </div>
+            <button class="button button-primary button-compact" id="newRecordButton" type="button">新增记录</button>
+          </div>
+          <div class="record-draft-notice" id="recordDraftNotice" hidden>
+            <p id="recordDraftSummary">未完成草稿</p>
+            <div class="record-draft-actions">
+              <button class="button button-secondary button-compact" id="resumeDraftButton" type="button">继续填写</button>
+              <button class="button button-secondary button-compact record-draft-discard" id="discardDraftButton" type="button">放弃草稿</button>
+            </div>
+          </div>
+          <div class="record-list" id="recordList" role="list" aria-live="polite" aria-busy="false">
+            <div class="empty-state">
+              <strong>还没有操作记录</strong>
+              <p>保存后会显示在这里。</p>
+            </div>
+          </div>
+        </section>
+
+        <section class="records-surface" id="recordEditorView" aria-labelledby="recordEditorHeading" hidden>
+          <nav class="rules-crumb" aria-label="返回操作记录">
+            <button class="rules-crumb-back" id="recordEditorBackButton" type="button">返回记录</button>
+            <span>操作记录 / 新增记录</span>
+          </nav>
+          <form class="trade-form editor-card" id="tradeForm" autocomplete="off">
+            <div class="editor-heading">
+              <div>
+                <h2 id="recordEditorHeading" tabindex="-1">新增一条操作记录</h2>
+                <p class="record-draft-status" id="recordDraftStatus" role="status" aria-live="polite" hidden></p>
+              </div>
+              <strong class="amount-preview" id="tradeAmount">成交金额 ¥ 0.00</strong>
+            </div>
+
+            <input id="tradeRequestId" name="request_id" type="hidden">
+            <section class="trade-section">
+            <div class="checklist-heading">
+              <h3><span class="stage-index" aria-hidden="true">01</span>成交事实</h3>
+              <small>只填已经发生的成交</small>
+            </div>
+            <div class="form-grid">
+              <label>
+                <span>日期</span>
+                <input id="tradeDate" name="trade_date" type="date" required>
+              </label>
+              <label class="select-shell">
+                <span>操作方向</span>
+                <select id="tradeSide" name="side" required>
+                  <option value="BUY">买入</option>
+                  <option value="SELL">卖出</option>
+                </select>
+              </label>
+              <div class="form-span-two stock-picker" id="tradeSymbolPicker">
+                <label for="tradeSymbol">股票代码</label>
+                <div class="stock-combobox">
+                  <input
+                    id="tradeSymbol"
+                    name="symbol"
+                    type="search"
+                    placeholder="输入代码或名称搜索"
+                    inputmode="text"
+                    autocomplete="off"
+                    role="combobox"
+                    aria-autocomplete="list"
+                    aria-expanded="false"
+                    aria-controls="tradeSymbolOptions"
+                    required
+                  >
+                  <button
+                    class="stock-picker-toggle"
+                    id="tradeSymbolToggle"
+                    type="button"
+                    aria-label="展开全部股票"
+                    aria-controls="tradeSymbolOptions"
+                    aria-expanded="false"
+                  >⌄</button>
+                  <div class="stock-option-list" id="tradeSymbolOptions" role="listbox" aria-label="选择股票" hidden></div>
+                </div>
+                <small>点击输入框可查看全部股票，输入代码或名称可搜索。</small>
+              </div>
+              <label>
+                <span>成交价格</span>
+                <input id="tradePrice" name="price" type="number" min="0.001" step="0.001" inputmode="decimal" placeholder="0.00" required>
+              </label>
+              <label>
+                <span>成交数量</span>
+                <input id="tradeShares" name="shares" type="number" min="1" step="1" inputmode="numeric" placeholder="0" required>
+              </label>
+            </div>
+            </section>
+
+            <section class="trade-checklist trade-section" aria-labelledby="tradeReasonHeading">
+              <div class="checklist-heading">
+                <h3 id="tradeReasonHeading"><span class="stage-index" aria-hidden="true">02</span>为什么买入</h3>
+                <small>按实际情况勾选，可多选</small>
+              </div>
+              <div class="check-grid" id="tradeReasonList">
+                <label class="check-item">
+                  <input type="checkbox" name="reason_tag" value="RULE_TRIGGER">
+                  <span data-buy-label="来自当前规则筛选候选" data-sell-label="事前止损或退出规则已触发">来自当前规则筛选候选</span>
+                </label>
+                <label class="check-item">
+                  <input type="checkbox" name="reason_tag" value="LOGIC_STATUS">
+                  <span data-buy-label="核心逻辑仍成立" data-sell-label="核心逻辑已经失效">核心逻辑仍成立</span>
+                </label>
+                <label class="check-item">
+                  <input type="checkbox" name="reason_tag" value="CLOSE_CONFIRMATION">
+                  <span data-buy-label="收盘确认信号已出现" data-sell-label="计划卖出条件已到达">收盘确认信号已出现</span>
+                </label>
+                <label class="check-item">
+                  <input type="checkbox" name="reason_tag" value="PLANNED_BATCH">
+                  <span data-buy-label="按计划分批买入" data-sell-label="按计划分批卖出">按计划分批买入</span>
+                </label>
+              </div>
+            </section>
+
+            <section class="trade-checklist trade-section" aria-labelledby="tradeDisciplineHeading">
+              <div class="checklist-heading">
+                <h3 id="tradeDisciplineHeading"><span class="stage-index" aria-hidden="true">03</span>纪律核对</h3>
+                <small>未确认也会如实记录</small>
+              </div>
+              <div class="check-grid">
+                <label class="check-item">
+                  <input type="checkbox" name="discipline_check" value="EXIT_PLAN">
+                  <span>已提前写明止损或退出条件</span>
+                </label>
+                <label class="check-item">
+                  <input type="checkbox" name="discipline_check" value="POSITION_CHECK">
+                  <span data-buy-label="已核对买入后的仓位上限" data-sell-label="已核对卖出数量和剩余仓位">已核对买入后的仓位上限</span>
+                </label>
+                <label class="check-item">
+                  <input type="checkbox" name="discipline_check" value="NOT_IMPULSIVE">
+                  <span>本次不是盘中临时起意</span>
+                </label>
+              </div>
+            </section>
+
+            <section class="trade-checklist emotion-checklist trade-section" aria-labelledby="tradeEmotionHeading">
+              <div class="checklist-heading">
+                <h3 id="tradeEmotionHeading"><span class="stage-index" aria-hidden="true">04</span>情绪状态</h3>
+                <small>当时有就勾选；不勾选只表示未记录到</small>
+              </div>
+              <div class="check-grid">
+                <label class="check-item calm-check">
+                  <input id="tradeEmotionClear" type="checkbox" name="emotion_clear" value="NO_RISK">
+                  <span>当时无明显情绪驱动</span>
+                </label>
+                <label class="check-item">
+                  <input type="checkbox" name="emotion_flag" value="FOMO">
+                  <span>害怕错过或追涨</span>
+                </label>
+                <label class="check-item">
+                  <input type="checkbox" name="emotion_flag" value="RECOVERY_URGE">
+                  <span>焦虑、后悔或急于回本</span>
+                </label>
+                <label class="check-item">
+                  <input type="checkbox" name="emotion_flag" value="CHASE_BACK">
+                  <span>刚卖飞想追回</span>
+                </label>
+                <label class="check-item">
+                  <input type="checkbox" name="emotion_flag" value="OVERWATCH">
+                  <span>连续盯盘超过 20 分钟</span>
+                </label>
+                <label class="check-item">
+                  <input type="checkbox" name="emotion_flag" value="FEELING_ONLY">
+                  <span>操作理由只是“感觉”</span>
+                </label>
+              </div>
+            </section>
+
+            <section class="trade-section">
+            <div class="checklist-heading">
+              <h3><span class="stage-index" aria-hidden="true">05</span>补充说明</h3>
+              <small>只补充勾选项没有覆盖的事实</small>
+            </div>
+            <label class="field-stack trade-notes">
+              <span class="sr-only">补充说明</span>
+              <textarea id="tradeNotes" name="notes" rows="2" maxlength="180" placeholder="例如：分两笔成交，此为第二笔"></textarea>
+            </label>
+            </section>
+
+            <div class="discipline-status is-warning" id="tradeDisciplineStatus" role="status" aria-live="polite">
+              尚未勾选操作依据，保存后会标记为纪律核对不完整。
+            </div>
+            <div class="form-feedback" id="tradeFeedback" role="status" aria-live="polite">
+              记录只保存自报事实和勾选结果，不代表规则允许操作。
+            </div>
+            <button class="button button-primary trade-save-button" id="saveTradeButton" type="submit">保存操作记录</button>
+          </form>
+
+        </section>
+      </div>
+    </section>
+
+    </section>
+  </main>
+
+  <dialog class="modal data-modal" id="dataDialog" aria-labelledby="dataDialogTitle">
+    <div class="modal-shell">
+      <header class="modal-header">
+        <div>
+          <span class="section-label">股票数据入口</span>
+          <h2 id="dataDialogTitle">管理本地股票库</h2>
+        </div>
+        <button class="icon-button" id="closeDataDialogButton" type="button" aria-label="关闭">×</button>
+      </header>
+
+      <section class="data-alignment-card" aria-labelledby="dataAlignmentHeading">
+        <div class="data-alignment-heading">
+          <div>
+            <span class="section-label">日期核对</span>
+            <h3 id="dataAlignmentHeading">是否与当前日期一致</h3>
+            <p class="data-alignment-counts" id="dialogDataCounts" aria-live="polite">本地 0 只 · 已对齐 0 只</p>
+          </div>
+          <span class="data-alignment-pill is-warning" id="dialogAlignmentStatus">正在核对</span>
+        </div>
+        <dl class="data-date-grid">
+          <div><dt>今天</dt><dd id="dialogCurrentDate">—</dd></div>
+          <div><dt>本次对齐目标</dt><dd id="dialogTargetDate">—</dd></div>
+          <div><dt>实际共同日期</dt><dd id="dialogActualDate">—</dd></div>
+        </dl>
+        <p id="dialogAlignmentRelation">与当前日期对齐：待确认</p>
+        <small>自然日只用于直观核对；周末或休市日时，数据日期与今天不同可能是正常状态。</small>
+      </section>
+
+      <div class="form-feedback dialog-feedback" id="dataFeedback" role="status" aria-live="polite" aria-atomic="true">
+        数据状态读取完成后，可一键按顺序更新全部本地股票。
+      </div>
+
+      <div class="data-actions">
+        <button class="button button-primary button-full" id="updateAllDataButton" type="button">一键更新全部股票</button>
+        <button class="button button-secondary button-compact" id="syncStockCatalogButton" type="button">更新完整股票目录</button>
+      </div>
+      <p class="data-action-note">完整目录只用于搜索；只有本人加入本地库的股票才会下载日线并参与一键更新。</p>
+
+      <details class="data-import-panel" id="marketCsvImport">
+        <summary>
+          <span class="data-import-summary">
+            <strong>手动导入 CSV</strong>
+            <small>自动更新不可用时，将文件统一为项目格式</small>
+          </span>
+          <span class="data-import-tag">备用入口</span>
+        </summary>
+        <form class="csv-import-form" id="marketCsvImportForm">
+          <input id="marketCsvRequestId" name="request_id" type="hidden">
+          <div class="csv-import-grid">
+            <label class="field-stack">
+              <span>股票代码</span>
+              <input id="marketCsvSymbol" name="symbol" type="text" maxlength="9" placeholder="例如 600760.SH" autocomplete="off" required>
+            </label>
+            <div class="field-stack csv-file-field">
+              <span>CSV 文件</span>
+              <input class="visually-hidden-file" id="marketCsvFile" name="file" type="file" accept=".csv,text/csv" aria-describedby="marketCsvSchemaHelp marketCsvFeedback" required>
+              <label class="csv-file-picker" for="marketCsvFile">
+                <strong>选择文件</strong>
+                <small id="marketCsvFileName">尚未选择</small>
+              </label>
+            </div>
+            <label class="field-stack">
+              <span>成交量单位</span>
+              <select id="marketCsvVolumeUnit" name="volume_unit">
+                <option value="shares">股</option>
+                <option value="lots">手（自动 ×100）</option>
+              </select>
+            </label>
+            <label class="field-stack">
+              <span>文件价格口径</span>
+              <select id="marketCsvAdjust" name="adjust">
+                <option value="qfq">前复权数据</option>
+                <option value="">不复权数据</option>
+                <option value="hfq">后复权数据</option>
+              </select>
+            </label>
+          </div>
+          <p class="csv-schema-help" id="marketCsvSchemaHelp">
+            支持中文或英文列名；必须包含日期、开盘、最高、最低、收盘、成交量，文件不超过 8 MB。系统记录所选价格口径，不会重算价格。
+          </p>
+          <div class="form-feedback" id="marketCsvFeedback" role="status" aria-live="polite">
+            校验全部通过后才会写入本地股票库；历史很短的新股也可正常导入。
+          </div>
+          <button class="button button-secondary button-full" id="importMarketCsvButton" type="submit">校验并导入</button>
+        </form>
+      </details>
+
+      <label class="data-search">
+        <span>搜索或新增股票</span>
+        <input
+          id="dataStockSearch"
+          type="search"
+          placeholder="输入代码或名称，搜索全部 A 股"
+          autocomplete="off"
+          aria-controls="dataStockList"
+        >
+        <small id="dataCatalogMeta">未输入时显示本地股票库。</small>
+      </label>
+
+      <div class="data-list-heading">
+        <h3><span id="dataStockListTitle">本地股票库</span> <strong id="dataStockListCount">0</strong></h3>
+        <small id="dataStockListMeta" role="status" aria-live="polite">按代码排序</small>
+      </div>
+      <div class="data-stock-list" id="dataStockList" role="list" aria-label="股票清单" aria-busy="false">
+        <p class="loading-copy">正在读取本地股票…</p>
+      </div>
+    </div>
+  </dialog>
+
+  <dialog class="modal" id="ruleDialog" aria-labelledby="ruleDialogTitle">
+    <form class="modal-shell rule-definition-form" id="ruleDefinitionForm">
+      <header class="modal-header">
+        <div>
+          <span class="section-label">规则库</span>
+          <h2 id="ruleDialogTitle">新增规则</h2>
+        </div>
+        <button class="icon-button" id="closeRuleDialogButton" type="button" aria-label="关闭">×</button>
+      </header>
+
+      <label class="field-stack">
+        <span>规则名称</span>
+        <input id="ruleName" name="rule_name" type="text" maxlength="80" placeholder="例如：收盘价高于 20 日均线" required>
+      </label>
+
+      <label class="field-stack">
+        <span>执行条件</span>
+        <textarea id="ruleExpression" name="rule_expression" maxlength="2000" rows="3" spellcheck="false" placeholder="例如：close &gt; ma20" required></textarea>
+      </label>
+
+      <div class="expression-examples" id="ruleExpressionExamples" aria-label="执行条件示例"></div>
+
+      <details class="expression-help">
+        <summary>查看可用行情字段和函数</summary>
+        <p id="ruleExpressionNotice">只支持本地日线行情字段和安全函数。</p>
+        <div class="field-chip-list" id="ruleFieldList"></div>
+        <p class="function-list" id="ruleFunctionList"></p>
+      </details>
+
+      <label class="field-stack">
+        <span>分类</span>
+        <div class="select-shell"><select id="ruleTag" name="rule_tag"></select></div>
+      </label>
+
+      <label class="field-stack">
+        <span>规则说明 <small>选填</small></span>
+        <textarea id="ruleDescription" name="rule_description" maxlength="500" rows="2" placeholder="说明这条规则用于观察什么"></textarea>
+      </label>
+
+      <div class="form-feedback" id="ruleDefinitionFeedback" role="status" aria-live="polite"></div>
+      <button class="button button-primary button-full" id="confirmRuleDefinitionButton" type="submit">新增规则</button>
+    </form>
+  </dialog>
+
+  <dialog class="modal confirm-modal" id="confirmDialog" aria-labelledby="confirmDialogTitle">
+    <form class="modal-shell confirm-shell" id="confirmDialogForm" method="dialog">
+      <h2 id="confirmDialogTitle">确认操作</h2>
+      <p id="confirmDialogMessage"></p>
+      <label class="field-stack" id="confirmDialogField" hidden>
+        <span>分类名称</span>
+        <input id="confirmDialogInput" type="text" maxlength="12" autocomplete="off" aria-describedby="confirmDialogError">
+        <small class="field-error" id="confirmDialogError" role="alert" hidden></small>
+      </label>
+      <div class="confirm-actions">
+        <button class="button button-secondary" id="confirmDialogCancel" type="button">取消</button>
+        <button class="button button-primary" id="confirmDialogAccept" type="button">确定</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div class="toast" id="toast" role="status" aria-live="polite" aria-atomic="true"></div>
+
+  <script src="/shared/panel-core.js?v=1.0.1"></script>
+  <script type="module" src="/app.js?v=1.0.1"></script>
+</body>
+</html>

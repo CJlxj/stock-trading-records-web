@@ -1,0 +1,106 @@
+signal_rules:
+  buy_candidate: {}
+  watch: {}
+  risk_reduce:
+    min_risk_score: 3
+  stop_trigger:
+    default_stop_loss_pct: -0.08
+    trailing_stop_from_high_pct: -0.1
+candidate_framework:
+  scoring_mode: equal_vote
+  active_rules:
+  - close_above_ma60
+  - volume_ratio_above_1_3
+  - price_volume_confirmed
+  - volume_trend_positive
+  - gap_not_extreme
+  min_active_rules: 4
+  max_active_rules: 12
+  pass_score_ratio: 0.65
+  watch_score_ratio: 0.45
+  priority_high_ratio: 0.8
+  min_group_passes: 3
+  group_pass_ratio: 0.5
+  groups:
+    trend_structure:
+      label: 趋势结构
+      checks:
+      - close_above_ma20
+      - ma5_above_ma10
+      - close_above_ma60
+      - ma20_slope_positive
+      - ma20_above_ma60
+    price_volume:
+      label: 量价确认
+      checks:
+      - volume_ratio_above_1_3
+      - price_volume_confirmed
+      - volume_trend_positive
+      - obv_trend_positive
+      - close_near_high_with_volume
+    momentum:
+      label: 动能
+      checks:
+      - macd_hist_positive
+      - macd_hist_improving
+      - rsi_healthy
+      - rsi_improving
+      - roc20_positive
+    location_risk:
+      label: 位置与波动
+      checks:
+      - not_over_extended
+      - position_above_20d_mid
+      - near_20d_high
+      - atr_not_high
+      - gap_not_extreme
+thresholds:
+  volume_ratio_buy: 1.3
+  rsi_low: 45.0
+  rsi_high: 70.0
+  rsi_overbought: 75
+  extension_from_ma20_max: 0.1
+  atr_risk_pct_high: 0.05
+position_rules:
+  default_account_total_asset: 100000
+  normal_position_pct_max: 0.3
+  high_risk_position_pct: 0.4
+  heavy_position_pct: 0.5
+  single_add_pct_max: 0.1
+data_quality:
+  minimum_rows: 60
+  max_age_days:
+    day: 7
+    week: 14
+    month: 45
+    year: 400
+    minute: 2
+  future_date_grace_days: 1
+  max_upload_mb: 8
+selection_rules:
+  enabled: true
+  allowed_markets:
+  - SH
+  - SZ
+  exclude_st: false
+  exclude_suspended: true
+  min_price: 0.0
+  max_price: 0.0
+  min_avg_amount_20d: 0.0
+  notes: ''
+trade_rules:
+  buy:
+    required_technical_status: BUY_CANDIDATE
+    require_written_plan: true
+    require_stop_loss: true
+    require_max_loss: true
+    require_sell_condition: true
+    require_fundamental_source: true
+    min_reward_risk: 2.0
+    max_single_order_plan_pct: 0.4
+    notes: ''
+  sell:
+    require_predefined_trigger: true
+    prohibit_emotion_exit: true
+    require_sell_condition: true
+    notes: ''
