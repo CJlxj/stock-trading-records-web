@@ -109,6 +109,40 @@ EMOTION_FLAG_LABELS = {
     "FEELING_ONLY": "操作理由只是感觉",
 }
 
+# 四类操作只由「本笔成交股数」和「成交后剩余股数」这两个已记录事实推出，
+# 不看券商摘要文字，也不重新推算持仓。
+TRADE_OPERATION_LABELS = {
+    "FIRST_BUY": "首次买入",
+    "ADD": "加仓",
+    "REDUCE": "减仓",
+    "CLOSE": "清仓",
+}
+
+# 台账每笔成交必须具备的事实字段。缺任何一项都只标记「历史数据不完整」，
+# 不倒推、不拿别的字段凑数。成交时间刻意不在其中：它允许未知。
+# 费用也不在其中：费用未知不算缺字段，而是让受它影响的成本与盈亏带「不含未知费用」。
+TRADE_FACT_LABELS = {
+    "trade_date": "成交日期",
+    "symbol": "股票代码",
+    "side": "买卖方向",
+    "price": "成交价格",
+    "shares": "成交数量",
+    "remaining_shares": "成交后剩余股数",
+    "avg_cost_after_trade": "成交后平均成本",
+    "realized_pnl": "该笔已实现盈亏",
+}
+
+UNKNOWN_TIME_LABEL = "未记录"
+INCOMPLETE_HISTORY_LABEL = "历史数据不完整"
+UNCLASSIFIED_OPERATION_LABEL = "未归类"
+FEE_UNKNOWN_LABEL = "费用未知"
+FEE_EXCLUDED_LABEL = "不含未知费用"
+ORDER_AMBIGUOUS_REASON = "同一天有成交没有记录成交时间，先后顺序无法确认"
+
+# 成交时间未知时不伪造具体时刻。排序和追加校验统一把它当成当日最后一刻：
+# 它确实是当天最后被补进台账的一笔，这样同日已知时间的成交也不会被它挡住。
+_UNKNOWN_TIME_ORDER = "23:59:59.999999"
+
 ALIASES = {
     "snapshot_date": ["snapshot_date", "快照日期", "日期", "数据日期"],
     "trade_date": ["trade_date", "成交日期", "交易日期", "日期"],
@@ -387,14 +421,24 @@ def _trade_number(value: Any, label: str, *, integer: bool = False) -> float | i
     return parsed
 
 
-def _optional_trade_number(value: Any, label: str) -> float:
-    if value in (None, ""):
-        return 0.0
+def _reported_trade_number(value: Any, label: str) -> float | None:
+    """读用户自报的可选金额。留空返回 None（未知），明确填 0 返回 0.0。
+
+    这两者绝不能折叠成同一个值：0 是「确实没有费用」这个事实，
+    None 是「不知道」，后者不得让受它影响的成本或盈亏被当成精确完整值。
+    """
+    if value is None:
+        return None
+    text = str(value).replace(",", "").strip()
+    if not text:
+        return None
     try:
-        parsed = float(str(value).replace(",", "").strip())
-    except (TypeError, ValueError):
+        parsed = float(text)
+    except ValueError:
         raise PersonalDataError(f"{label}必须是有效数字。") from None
-    if not math.isfinite(parsed) or parsed < 0:
+    if not math.isfinite(parsed):
+        raise PersonalDataError(f"{label}必须是有效数字。")
+    if parsed < 0:
         raise PersonalDataError(f"{label}不能小于 0。")
     return parsed
 
@@ -413,54 +457,283 @@ def _trade_rows(path: Path) -> list[dict[str, str]]:
         raise PersonalDataError(f"操作记录无法读取：{exc}") from exc
 
 
-def _trade_timestamp(row: dict[str, str]) -> datetime | None:
-    raw = f"{row.get('trade_date', '')} {row.get('trade_time', '') or '00:00:00'}"
+def _trade_moment(trade_date: Any, trade_time: Any) -> datetime | None:
+    date_text = str(trade_date or "").strip()
+    time_text = str(trade_time or "").strip()
+    if not date_text:
+        return None
     try:
-        return datetime.fromisoformat(raw)
+        return datetime.fromisoformat(f"{date_text} {time_text or _UNKNOWN_TIME_ORDER}")
     except ValueError:
         return None
 
 
-def _latest_trade_balance(
+def _trade_timestamp(row: dict[str, str]) -> datetime | None:
+    return _trade_moment(row.get("trade_date", ""), row.get("trade_time", ""))
+
+
+def _normalize_trade_time(value: Any) -> str:
+    """把成交时间统一成 HH:MM:SS；识别不了就留空，由调用方决定报错还是按未记录处理。"""
+    text = re.sub(r"[\s　]+", "", str(value or ""))
+    if not text:
+        return ""
+    for pattern in ("%H:%M:%S", "%H:%M", "%H%M%S", "%H%M"):
+        try:
+            return datetime.strptime(text, pattern).strftime("%H:%M:%S")
+        except ValueError:
+            continue
+    return ""
+
+
+def _trade_time_label(value: Any) -> str:
+    normalized = _normalize_trade_time(value)
+    return normalized[:5] if normalized else UNKNOWN_TIME_LABEL
+
+
+def _stored_number(value: Any) -> float | None:
+    """读台账里已经落盘的数字。空值或读不出来一律返回 None，绝不补默认值。"""
+    text = "" if value is None else str(value).replace(",", "").strip()
+    if not text:
+        return None
+    try:
+        parsed = float(text)
+    except ValueError:
+        return None
+    return parsed if math.isfinite(parsed) else None
+
+
+def _stored_int(value: Any) -> int | None:
+    parsed = _stored_number(value)
+    return None if parsed is None else int(round(parsed))
+
+
+def _trade_operation_class(side: str, shares: int | None, remaining: int | None) -> str:
+    if side == "BUY":
+        if shares is None or remaining is None:
+            return ""
+        previous = remaining - shares
+        if previous < 0:
+            return ""
+        return "FIRST_BUY" if previous == 0 else "ADD"
+    if side == "SELL":
+        if remaining is None:
+            return ""
+        return "CLOSE" if remaining == 0 else "REDUCE"
+    return ""
+
+
+def _trade_ledger_facts(
+    row: dict[str, str],
+    *,
+    fee_complete: bool = True,
+) -> dict[str, Any]:
+    """只复述该行已经写下的事实，并如实报告缺了哪些字段、数值是否已含全部费用。"""
+    side = str(row.get("side") or "").strip().upper()
+    price = _stored_number(row.get("price"))
+    shares = _stored_int(row.get("shares"))
+    remaining = _stored_int(row.get("remaining_shares"))
+    average_cost = _stored_number(row.get("avg_cost_after_trade"))
+    realized = _stored_number(row.get("realized_pnl"))
+    fee = _stored_number(row.get("fee"))
+    # 「本笔费用合计」在两条路径上的表达方式不同，读取时必须按来源分别理解：
+    # 手工行把合计直接写进 fee，三项明细留空表示「未单独记录」；
+    # 导入行的 fee 列语义是券商的「佣金」，只有四项明细齐全时合计才算已知——
+    # 只有佣金=0 而印花税缺列时说「本笔费用合计 0 元」是假话。
+    if str(row.get("source") or "").startswith("panel_manual:"):
+        fee_total = fee
+    else:
+        details = [
+            _stored_number(row.get(key))
+            for key in ("fee", "stamp_tax", "transfer_fee", "other_fee")
+        ]
+        fee_total = None if any(d is None for d in details) else round(sum(details), 4)
+    present = {
+        "trade_date": _trade_moment(row.get("trade_date"), "") is not None,
+        "symbol": bool(str(row.get("symbol") or "").strip()),
+        "side": side in {"BUY", "SELL"},
+        "price": price is not None and price > 0,
+        "shares": shares is not None and shares > 0,
+        "remaining_shares": remaining is not None and remaining >= 0,
+        "avg_cost_after_trade": average_cost is not None and average_cost >= 0,
+        "realized_pnl": realized is not None,
+    }
+    missing = [TRADE_FACT_LABELS[key] for key, ok in present.items() if not ok]
+    # 四类归类只由本行**已被接受**的成交股数与成交后剩余股数推出。
+    # 绝不用刚刚判为缺失的值（例如源文件给了负数剩余股数）去归类，
+    # 也绝不反解 operation 列里的中文标签——那四个词本身就是面板算出来的。
+    operation_class = _trade_operation_class(
+        side,
+        shares if present["shares"] else None,
+        remaining if present["remaining_shares"] else None,
+    )
+    # 费用只影响两处：买入费用计入成本，卖出费用计入已实现盈亏。
+    # 买入的已实现盈亏恒为 0，与费用无关，所以那一格不加限定语。
+    caveat = "" if fee_complete else FEE_EXCLUDED_LABEL
+    cost_note = caveat if present["avg_cost_after_trade"] else ""
+    realized_note = (
+        caveat if present["realized_pnl"] and side == "SELL" else ""
+    )
+    return {
+        "price": price if present["price"] else None,
+        "shares": shares if present["shares"] else None,
+        "remaining_shares": remaining if present["remaining_shares"] else None,
+        "avg_cost_after_trade": average_cost if present["avg_cost_after_trade"] else None,
+        "realized_pnl": realized if present["realized_pnl"] else None,
+        "fee": fee_total,
+        "fee_reported": fee_total is not None,
+        "fee_complete": bool(fee_complete),
+        # 只有确实存在受费用影响的数值时才提这句，否则数字位已经是「—」，无须再加注。
+        "fee_note": cost_note or realized_note,
+        "cost_fee_note": cost_note,
+        "realized_fee_note": realized_note,
+        "exact": (not missing) and bool(fee_complete),
+        "operation_class": operation_class,
+        "operation_label": TRADE_OPERATION_LABELS.get(
+            operation_class, UNCLASSIFIED_OPERATION_LABEL
+        ),
+        "complete": not missing,
+        "missing_fields": missing,
+    }
+
+
+def _trade_fee_chain(rows: list[dict[str, str]]) -> dict[int, bool]:
+    """标出每一行的成本与已实现盈亏是否已含全部费用。
+
+    面板自己算出来的行（source 以 panel_manual: 开头）在费用留空时把标记置为「未含」，
+    并沿该股票之后的每一笔继续传递——早先一笔费用未知，后面的摊薄成本同样不含它。
+    源文件直接给出剩余股数与平均成本的行会重置标记：那两个数字是券商的口径，不是我们算的。
+    """
+    by_symbol: dict[str, list[int]] = {}
+    for index, row in enumerate(rows):
+        symbol = str(row.get("symbol") or "").strip()
+        if symbol:
+            by_symbol.setdefault(symbol, []).append(index)
+
+    carried_by_index: dict[int, bool] = {}
+    for indexes in by_symbol.values():
+        indexes.sort(key=lambda index: _trade_timestamp(rows[index]) or datetime.min)
+        carried = True
+        for index in indexes:
+            row = rows[index]
+            if str(row.get("source") or "").startswith("panel_manual:"):
+                if _stored_number(row.get("fee")) is None:
+                    carried = False
+            elif (
+                _stored_int(row.get("remaining_shares")) is not None
+                and _stored_number(row.get("avg_cost_after_trade")) is not None
+            ):
+                carried = True
+            carried_by_index[index] = carried
+            # 清仓后成本基数归零：之后重新买入的成本与更早那些未知费用再无关系。
+            # 但清仓这一笔自己的已实现盈亏仍受未知费用影响，所以先记下再复位。
+            if _stored_int(row.get("remaining_shares")) == 0:
+                carried = True
+    return carried_by_index
+
+
+def _order_is_ambiguous(rows: list[dict[str, str]]) -> bool:
+    """判断同一天内的先后顺序是否无从确认。
+
+    _UNKNOWN_TIME_ORDER 只是内部排序约定，不是事实。什么时候算有据：
+    - 同一天里有的记了时间、有的没记 → 没记的那笔被排到「当日最后」是编出来的，无据；
+    - 同一天里全都没记时间，但全部是面板自己按顺序追加的行 → 追加次序本身就是记录，
+      稳定排序会保留它，有据；
+    - 同一天里全都没记时间且含导入行 → 券商导出常按倒序，行序不构成证据，无据。
+      （实测：同日一买一卖的倒序导出会让「最后一笔」翻转。）
+    """
+    by_date: dict[str, list[dict[str, str]]] = {}
+    for row in rows:
+        trade_date = str(row.get("trade_date") or "").strip()
+        if trade_date:
+            by_date.setdefault(trade_date, []).append(row)
+    for group in by_date.values():
+        if len(group) < 2:
+            continue
+        timed = [bool(_normalize_trade_time(row.get("trade_time"))) for row in group]
+        if any(timed) and not all(timed):
+            return True
+        if not any(timed) and not all(
+            str(row.get("source") or "").startswith("panel_manual:") for row in group
+        ):
+            return True
+    return False
+
+
+def _recorded_position_state(
     rows: list[dict[str, str]],
     symbol: str,
-) -> tuple[int, float, datetime | None]:
-    shares_total = 0
-    average_cost = 0.0
-    latest_timestamp: datetime | None = None
-    matching = [row for row in rows if row.get("symbol") == symbol]
-    matching.sort(key=lambda row: _trade_timestamp(row) or datetime.min)
-    for row in matching:
-        timestamp = _trade_timestamp(row)
-        if timestamp is not None:
-            latest_timestamp = timestamp
-        remaining_raw = row.get("remaining_shares", "")
-        average_raw = row.get("avg_cost_after_trade", "")
-        if remaining_raw not in ("", None):
-            try:
-                shares_total = max(0, int(round(float(remaining_raw))))
-            except ValueError:
-                pass
-        else:
-            try:
-                quantity = max(0, int(round(float(row.get("shares") or 0))))
-            except ValueError:
-                quantity = 0
-            if row.get("side") == "BUY":
-                shares_total += quantity
-            elif row.get("side") == "SELL":
-                shares_total = max(0, shares_total - quantity)
-        if average_raw not in ("", None):
-            try:
-                average_cost = max(0.0, float(average_raw))
-            except ValueError:
-                pass
-        elif shares_total == 0:
-            average_cost = 0.0
-    return shares_total, average_cost, latest_timestamp
+    fee_chain: dict[int, bool] | None = None,
+) -> dict[str, Any]:
+    """该股票在台账里已经记录的最新持仓状态，读不出来就明确报未知。
+
+    绝不按买卖方向重建持仓，绝不把未知成本当成 0，也绝不沿用上一行的数字顶替这一行。
+    """
+    indexes = [
+        index
+        for index, row in enumerate(rows)
+        if row.get("symbol") == symbol
+    ]
+    indexes.sort(key=lambda index: _trade_timestamp(rows[index]) or datetime.min)
+    if not indexes:
+        # 台账里这只股票一笔都没有：前序确实是 0 股 0 成本，这是记录本身的事实，不是假定。
+        return {
+            "has_history": False,
+            "known": True,
+            "shares": 0,
+            "cost": 0.0,
+            "fee_complete": True,
+            "latest_timestamp": None,
+            "latest_time_known": True,
+            "reasons": [],
+        }
+
+    latest_index = indexes[-1]
+    latest = rows[latest_index]
+    matching = [rows[index] for index in indexes]
+    facts = [_trade_ledger_facts(row) for row in matching]
+    latest_facts = facts[-1]
+    shares = latest_facts["remaining_shares"]
+    cost = latest_facts["avg_cost_after_trade"]
+
+    reasons: list[str] = []
+    broken = sum(1 for item in facts if not item["complete"])
+    if broken:
+        reasons.append(f"{broken} 笔成交缺少必要字段")
+    undated = any(_trade_timestamp(row) is None for row in matching)
+    if undated:
+        reasons.append("有成交缺少可识别的成交日期，先后顺序无法确认")
+    ambiguous = _order_is_ambiguous(matching)
+    if ambiguous:
+        reasons.append(ORDER_AMBIGUOUS_REASON)
+    # 链条上任意一笔缺剩余股数或平均成本，就说不清持仓怎么变到今天的——
+    # 只看「排最后那一行」会让中间被判为不可信而留空的成交被整笔跳过。
+    incomplete_chain = any(
+        item["remaining_shares"] is None or item["avg_cost_after_trade"] is None
+        for item in facts
+    )
+    if shares is None:
+        reasons.append("最后一笔没有记录成交后剩余股数")
+    if cost is None:
+        reasons.append("最后一笔没有记录成交后平均成本")
+
+    chain = fee_chain if fee_chain is not None else _trade_fee_chain(rows)
+    return {
+        "has_history": True,
+        "known": not (incomplete_chain or undated or ambiguous),
+        "shares": shares,
+        "cost": cost,
+        "fee_complete": chain.get(latest_index, True),
+        "latest_timestamp": _trade_timestamp(latest),
+        "latest_time_known": bool(_normalize_trade_time(latest.get("trade_time"))),
+        "reasons": reasons,
+    }
 
 
-def _trade_display_row(row: dict[str, str]) -> dict[str, Any]:
+def _trade_display_row(
+    row: dict[str, str],
+    *,
+    fee_complete: bool = True,
+) -> dict[str, Any]:
     source = row.get("source", "")
     request_id = (
         source.removeprefix("panel_manual:")
@@ -475,19 +748,35 @@ def _trade_display_row(row: dict[str, str]) -> dict[str, Any]:
         return [str(item) for item in value] if isinstance(value, list) else []
 
     emotion_clear_raw = str(row.get("emotion_clear") or "").strip().lower()
+    facts = _trade_ledger_facts(row, fee_complete=fee_complete)
     return {
         "request_id": request_id,
         "trade_date": row.get("trade_date"),
         "trade_time": row.get("trade_time"),
+        "trade_time_known": bool(_normalize_trade_time(row.get("trade_time"))),
+        "trade_time_label": _trade_time_label(row.get("trade_time")),
         "symbol": row.get("symbol"),
         "stock_name": row.get("stock_name") or row.get("symbol"),
         "side": row.get("side"),
-        "price": float(row["price"]) if row.get("price") else None,
-        "shares": int(round(float(row["shares"]))) if row.get("shares") else None,
-        "gross_amount": (
-            float(row["gross_amount"]) if row.get("gross_amount") else None
-        ),
+        "price": facts["price"],
+        "shares": facts["shares"],
+        "gross_amount": _stored_number(row.get("gross_amount")),
+        "remaining_shares": facts["remaining_shares"],
+        "avg_cost_after_trade": facts["avg_cost_after_trade"],
+        "realized_pnl": facts["realized_pnl"],
+        "fee": facts["fee"],
+        "fee_reported": facts["fee_reported"],
+        "fee_complete": facts["fee_complete"],
+        "fee_note": facts["fee_note"],
+        "cost_fee_note": facts["cost_fee_note"],
+        "realized_fee_note": facts["realized_fee_note"],
+        "exact": facts["exact"],
         "operation": row.get("operation", ""),
+        "operation_class": facts["operation_class"],
+        "operation_label": facts["operation_label"],
+        "complete": facts["complete"],
+        "missing_fields": facts["missing_fields"],
+        "incomplete_label": "" if facts["complete"] else INCOMPLETE_HISTORY_LABEL,
         "rule_status": row.get("rule_status", ""),
         "emotion": row.get("emotion", ""),
         "checklist_version": row.get("checklist_version", ""),
@@ -601,6 +890,88 @@ def _trade_checklist_summary(
     }
 
 
+def _trade_symbol_summaries(
+    rows: list[dict[str, str]],
+    fee_chain: dict[int, bool] | None = None,
+) -> list[dict[str, Any]]:
+    """按股票复述最后一笔成交留下的剩余股数与平均成本，不重算、不补齐。"""
+    chain = fee_chain if fee_chain is not None else _trade_fee_chain(rows)
+    grouped: dict[str, list[int]] = {}
+    for index, row in enumerate(rows):
+        symbol = str(row.get("symbol") or "").strip()
+        if not symbol:
+            continue
+        grouped.setdefault(symbol, []).append(index)
+
+    summaries: list[dict[str, Any]] = []
+    for symbol, indexes in grouped.items():
+        indexes.sort(key=lambda index: _trade_timestamp(rows[index]) or datetime.min)
+        matching = [rows[index] for index in indexes]
+        facts = [
+            _trade_ledger_facts(rows[index], fee_complete=chain.get(index, True))
+            for index in indexes
+        ]
+        latest = matching[-1]
+        latest_facts = facts[-1]
+        reasons: list[str] = []
+        if any(_trade_timestamp(row) is None for row in matching):
+            reasons.append("有成交缺少可识别的成交日期，先后顺序无法确认")
+        broken = sum(1 for item in facts if not item["complete"])
+        if broken:
+            reasons.append(f"{broken} 笔成交缺少必要字段")
+        # 顺序无从确认时，「最后一笔」本身就是排序约定的产物，不能拿它的数字当事实。
+        ambiguous = _order_is_ambiguous(matching)
+        if ambiguous:
+            reasons.append(ORDER_AMBIGUOUS_REASON)
+        remaining = None if ambiguous else latest_facts["remaining_shares"]
+        average_cost = None if ambiguous else latest_facts["avg_cost_after_trade"]
+        if not ambiguous:
+            if remaining is None:
+                reasons.append("最后一笔没有记录成交后剩余股数")
+            if average_cost is None:
+                reasons.append("最后一笔没有记录成交后平均成本")
+        fee_complete = latest_facts["fee_complete"]
+        fee_reasons: list[str] = []
+        # 没有数值可限定时不提费用：数字位已经是「—」，再说「不含未知费用」只会添乱。
+        has_value = remaining is not None or average_cost is not None
+        if not fee_complete and has_value:
+            fee_reasons.append("成交账本平均成本与已实现盈亏不含未知费用")
+        summaries.append(
+            {
+                "symbol": symbol,
+                "stock_name": str(latest.get("stock_name") or "").strip() or symbol,
+                "trade_count": len(indexes),
+                "remaining_shares": remaining,
+                "avg_cost": average_cost,
+                "last_trade_date": str(latest.get("trade_date") or "").strip() or None,
+                "last_trade_time": str(latest.get("trade_time") or "").strip() or None,
+                "last_trade_time_label": _trade_time_label(latest.get("trade_time")),
+                "last_operation_label": (
+                    UNCLASSIFIED_OPERATION_LABEL
+                    if ambiguous
+                    else latest_facts["operation_label"]
+                ),
+                "complete": not reasons,
+                "incomplete_reasons": reasons,
+                "incomplete_label": INCOMPLETE_HISTORY_LABEL if reasons else "",
+                "fee_complete": fee_complete,
+                "fee_reasons": fee_reasons,
+                "fee_label": FEE_UNKNOWN_LABEL if fee_reasons else "",
+                # 「精确完整」要求既不缺字段、也不含未知费用。
+                "exact": (not reasons) and fee_complete,
+            }
+        )
+    # 两次稳定排序：先代码升序，再按最后一笔时间降序，最近动过的股票排在前面。
+    summaries.sort(key=lambda item: item["symbol"])
+    summaries.sort(
+        key=lambda item: _trade_moment(
+            item["last_trade_date"], item["last_trade_time"]
+        ) or datetime.min,
+        reverse=True,
+    )
+    return summaries
+
+
 def list_trade_records(
     project_root: str | Path,
     *,
@@ -614,9 +985,21 @@ def list_trade_records(
     if normalized_symbol:
         rows = [row for row in rows if row.get("symbol") == normalized_symbol]
     rows.sort(key=lambda row: _trade_timestamp(row) or datetime.min, reverse=True)
+    fee_chain = _trade_fee_chain(rows)
+    facts = [
+        _trade_ledger_facts(row, fee_complete=fee_chain.get(index, True))
+        for index, row in enumerate(rows)
+    ]
+    # 明细受 limit 限制，汇总必须覆盖全部成交，否则「还剩多少」会被截断。
     return {
-        "records": [_trade_display_row(row) for row in rows[:safe_limit]],
+        "records": [
+            _trade_display_row(row, fee_complete=fee_chain.get(index, True))
+            for index, row in enumerate(rows[:safe_limit])
+        ],
         "count": len(rows),
+        "symbol_summaries": _trade_symbol_summaries(rows, fee_chain),
+        "incomplete_record_count": sum(1 for item in facts if not item["complete"]),
+        "fee_unknown_record_count": sum(1 for item in facts if not item["fee_complete"]),
     }
 
 
@@ -636,31 +1019,24 @@ def append_trade_record(
     if trade_date > date.today():
         raise PersonalDataError("操作日期不能晚于今天。")
 
+    # 成交时间未知就留空，绝不用提交时间或创建时间冒充。
     raw_time = str(payload.get("trade_time") or "").strip()
-    if raw_time:
-        try:
-            trade_time = datetime.strptime(raw_time, "%H:%M").strftime("%H:%M:%S")
-        except ValueError:
-            try:
-                trade_time = datetime.strptime(raw_time, "%H:%M:%S").strftime(
-                    "%H:%M:%S"
-                )
-            except ValueError:
-                raise PersonalDataError("操作时间格式不正确。") from None
-    else:
-        trade_time = datetime.now().strftime("%H:%M:%S")
+    trade_time = _normalize_trade_time(raw_time)
+    if raw_time and not trade_time:
+        raise PersonalDataError("操作时间格式不正确。")
 
     symbol = _normalize_symbol(payload.get("symbol"))
     side = _normalize_side(payload.get("side"))
     price = float(_trade_number(payload.get("price"), "成交价格"))
     shares = int(_trade_number(payload.get("shares"), "成交数量", integer=True))
-    fee = _optional_trade_number(payload.get("fee"), "手续费")
+    # 本笔费用合计：留空表示未知，明确填 0 才表示确实没有费用。两者绝不可混为一谈。
+    fee = _reported_trade_number(payload.get("fee"), "本笔费用合计")
     notes = str(payload.get("notes") or "").strip()
     if len(notes) > 500:
         raise PersonalDataError("备注不能超过 500 字。")
     stock_name = str(payload.get("stock_name") or symbol).strip()[:80] or symbol
     source = f"panel_manual:{request_id}"
-    timestamp = datetime.combine(trade_date, datetime.strptime(trade_time, "%H:%M:%S").time())
+    timestamp = _trade_moment(trade_date.isoformat(), trade_time)
 
     root = Path(project_root)
     target = root / TARGET_FILES["trades"]
@@ -669,24 +1045,53 @@ def append_trade_record(
         rows = _trade_rows(target)
         duplicate = next((row for row in rows if row.get("source") == source), None)
         if duplicate is not None:
+            duplicate_chain = _trade_fee_chain(rows)
+            duplicate_index = rows.index(duplicate)
             return {
-                "record": _trade_display_row(duplicate),
+                "record": _trade_display_row(
+                    duplicate,
+                    fee_complete=duplicate_chain.get(duplicate_index, True),
+                ),
                 "deduplicated": True,
                 "count": len(rows),
             }
 
-        previous_shares, previous_cost, latest_timestamp = _latest_trade_balance(
-            rows,
-            symbol,
-        )
-        if latest_timestamp is not None and timestamp < latest_timestamp:
-            raise PersonalDataError("只能追加该股票最新的一次操作，请先核对日期和时间。")
-        if side == "SELL" and previous_shares <= 0:
-            raise PersonalDataError("没有可核对的历史持仓，暂不能录入卖出。")
-        if side == "SELL" and shares > previous_shares:
-            raise PersonalDataError(
-                f"卖出数量超过记录中的持仓 {previous_shares} 股，请先核对历史记录。"
-            )
+        state = _recorded_position_state(rows, symbol)
+        latest_timestamp = state["latest_timestamp"]
+        # 顺序校验只在能确定新成交更早时才拦。任一侧时间未知时只比日期——
+        # 不能拿「当日最后一刻」这个内部排序约定去否决一笔已经发生的成交。
+        if latest_timestamp is not None:
+            if state["latest_time_known"] and trade_time:
+                too_early = timestamp < latest_timestamp
+            else:
+                too_early = trade_date < latest_timestamp.date()
+            if too_early:
+                raise PersonalDataError("只能追加该股票最新的一次操作，请先核对日期和时间。")
+
+        # 顺序判定与读取侧共用 _order_is_ambiguous，口径不得分叉。
+        same_date_rows = [
+            row
+            for row in rows
+            if row.get("symbol") == symbol
+            and str(row.get("trade_date") or "").strip() == trade_date.isoformat()
+        ]
+        pending_row = {
+            "trade_date": trade_date.isoformat(),
+            "trade_time": trade_time,
+            "source": source,
+        }
+        order_ambiguous = _order_is_ambiguous([*same_date_rows, pending_row])
+        previous_known = state["known"] and not order_ambiguous
+
+        # 只有前序确实已知时才校验数量：未知时不得用一个从未被记录的数字
+        # 否决一笔已经发生的成交（需求 3）。
+        if side == "SELL" and previous_known:
+            if state["shares"] <= 0:
+                raise PersonalDataError("没有可核对的历史持仓，暂不能录入卖出。")
+            if shares > state["shares"]:
+                raise PersonalDataError(
+                    f"卖出数量超过记录中的持仓 {state['shares']} 股，请先核对历史记录。"
+                )
 
         has_checklist = any(
             key in payload
@@ -710,23 +1115,44 @@ def append_trade_record(
             checklist = None
 
         gross_amount = round(price * shares, 2)
+        fee_reported = fee is not None
+        # 费用未知时按不含费用计算，并由 _trade_fee_chain 给该股票之后的每一笔打上
+        # 「不含未知费用」标记；绝不把未知费用当成 0 而声称数值精确。
+        fee_amount = fee if fee_reported else 0.0
+        remaining_shares: int | None
+        average_cost: float | None
+        realized_pnl: float | None
+        net_amount: float | None
         if side == "BUY":
-            remaining_shares = previous_shares + shares
-            average_cost = (
-                previous_shares * previous_cost + gross_amount + fee
-            ) / remaining_shares
+            # 买入不产生已实现盈亏，这与前序状态和费用都无关，是本笔自身的事实。
             realized_pnl = 0.0
-            net_amount = -(gross_amount + fee)
+            if previous_known:
+                remaining_shares = state["shares"] + shares
+                average_cost = (
+                    state["shares"] * state["cost"] + gross_amount + fee_amount
+                ) / remaining_shares
+            else:
+                remaining_shares = None
+                average_cost = None
+            net_amount = -(gross_amount + fee_amount) if fee_reported else None
         else:
-            remaining_shares = previous_shares - shares
-            average_cost = previous_cost if remaining_shares else 0.0
-            realized_pnl = (price - previous_cost) * shares - fee
-            net_amount = gross_amount - fee
+            if previous_known:
+                remaining_shares = state["shares"] - shares
+                average_cost = state["cost"] if remaining_shares else 0.0
+                realized_pnl = (price - state["cost"]) * shares - fee_amount
+            else:
+                remaining_shares = None
+                average_cost = None
+                realized_pnl = None
+            net_amount = gross_amount - fee_amount if fee_reported else None
 
-        if side == "BUY":
-            operation = "首次买入" if previous_shares <= 0 else "加仓"
+        # 四类归类同样只在前序已知时给出，否则「首次买入」就是对前序的无据断言。
+        if not previous_known:
+            operation = ""
+        elif side == "BUY":
+            operation = "首次买入" if state["shares"] <= 0 else "加仓"
         else:
-            operation = "清仓" if shares == previous_shares else "减仓"
+            operation = "清仓" if shares == state["shares"] else "减仓"
 
         row = {column: "" for column in TRADE_COLUMNS}
         row.update(
@@ -741,15 +1167,29 @@ def append_trade_record(
                 "price": f"{price:.4f}".rstrip("0").rstrip("."),
                 "shares": str(shares),
                 "gross_amount": f"{gross_amount:.2f}",
-                "fee": f"{fee:.2f}",
-                "stamp_tax": "0.00",
-                "transfer_fee": "0.00",
-                "other_fee": "0.00",
-                "net_amount": f"{net_amount:.2f}",
-                "avg_cost_after_trade": f"{average_cost:.4f}",
-                "realized_pnl": f"{realized_pnl:.2f}",
-                "remaining_shares": str(remaining_shares),
-                "position_market_value": f"{remaining_shares * price:.2f}",
+                # 费用未知留空，明确 0 才写 0.00。三项明细手工表单从未采集过，
+                # 一律留空表示「未单独记录」，不再硬写 0.00 冒充事实。
+                # 用 4 位小数再去尾零：不足一分的自报费用不能被写成 "0.00"，
+                # 那会把「有一点费用」说成「明确没有费用」。
+                "fee": (
+                    f"{fee_amount:.4f}".rstrip("0").rstrip(".") or "0"
+                    if fee_reported
+                    else ""
+                ),
+                "stamp_tax": "",
+                "transfer_fee": "",
+                "other_fee": "",
+                "net_amount": "" if net_amount is None else f"{net_amount:.2f}",
+                "avg_cost_after_trade": (
+                    "" if average_cost is None else f"{average_cost:.4f}"
+                ),
+                "realized_pnl": "" if realized_pnl is None else f"{realized_pnl:.2f}",
+                "remaining_shares": (
+                    "" if remaining_shares is None else str(remaining_shares)
+                ),
+                "position_market_value": (
+                    "" if remaining_shares is None else f"{remaining_shares * price:.2f}"
+                ),
                 "rule_status": rule_status,
                 "emotion": emotion,
                 "checklist_version": (
@@ -801,8 +1241,14 @@ def append_trade_record(
             temporary.unlink(missing_ok=True)
             raise
 
+    # 回执里的完整性标记也必须走同一条链条判定：本笔费用已知，
+    # 但该股票早先某一笔费用未知时，这一笔的成本同样不含它。
+    written_chain = _trade_fee_chain(rows)
     return {
-        "record": _trade_display_row(row),
+        "record": _trade_display_row(
+            row,
+            fee_complete=written_chain.get(rows.index(row), True),
+        ),
         "deduplicated": False,
         "count": len(rows),
     }
@@ -824,8 +1270,11 @@ def _normalize_trades(frame: pd.DataFrame, filename: str) -> tuple[pd.DataFrame,
     warnings: list[str] = []
     output = pd.DataFrame(index=frame.index)
     output["trade_date"] = _normalize_dates(_series(frame, mapping, "trade_date"), "成交日期")
-    output["trade_time"] = _clean_text(_series(frame, mapping, "trade_time", "15:00:00"))
-    output.loc[output["trade_time"] == "", "trade_time"] = "15:00:00"
+    # 券商导出没有成交时间时留空，按「未记录」保存，不拿收盘时间冒充。
+    output["trade_time"] = _series(frame, mapping, "trade_time").map(_normalize_trade_time)
+    unknown_times = int((output["trade_time"] == "").sum())
+    if unknown_times:
+        warnings.append(f"{unknown_times} 笔成交没有可识别的成交时间，已按「未记录」保存。")
     output["symbol"] = _series(frame, mapping, "symbol").map(_normalize_symbol)
     output["stock_name"] = _clean_text(_series(frame, mapping, "stock_name"))
     output.loc[output["stock_name"] == "", "stock_name"] = output["symbol"]
@@ -844,14 +1293,22 @@ def _normalize_trades(frame: pd.DataFrame, filename: str) -> tuple[pd.DataFrame,
     output["shares"] = output["shares"].round().astype(int)
     output["gross_amount"] = _numbers(_series(frame, mapping, "gross_amount"))
     output["gross_amount"] = output["gross_amount"].fillna(output["price"] * output["shares"])
+    # 费用缺列或空格一律保持未知，绝不当作 0：A 股卖出必然有印花税，
+    # 把缺失写成 0 等于断言「本笔免费」，并让净额与成本继承这个零。
     for key in ["fee", "stamp_tax", "transfer_fee", "other_fee"]:
-        output[key] = _numbers(_series(frame, mapping, key)).fillna(0.0)
-    total_fee = output[["fee", "stamp_tax", "transfer_fee", "other_fee"]].sum(axis=1)
+        output[key] = _numbers(_series(frame, mapping, key))
+    # min_count 覆盖全部四项：默认的 skipna 会把未知当 0 求和，那是同一个伪造换了位置。
+    total_fee = output[["fee", "stamp_tax", "transfer_fee", "other_fee"]].sum(
+        axis=1, min_count=4
+    )
     output["net_amount"] = _numbers(_series(frame, mapping, "net_amount"))
     derived_net = output["gross_amount"].where(output["side"] == "SELL", -output["gross_amount"])
     derived_net = derived_net.where(output["side"] == "BUY", derived_net - total_fee)
     derived_net = derived_net.where(output["side"] == "SELL", derived_net - total_fee)
     output["net_amount"] = output["net_amount"].fillna(derived_net)
+    # 以下三列是台账的核心事实。源文件没给就必须保持为空：
+    # 它们的正确性依赖「导入区间覆盖了该股票从第一笔买入开始的完整历史」，
+    # 而导入方无从确认这一点。系统测算值一律不得反写进这三列（需求 1、2）。
     output["avg_cost_after_trade"] = _numbers(_series(frame, mapping, "avg_cost_after_trade"))
     output["realized_pnl"] = _numbers(_series(frame, mapping, "realized_pnl"))
     output["remaining_shares"] = _numbers(_series(frame, mapping, "remaining_shares"))
@@ -874,49 +1331,56 @@ def _normalize_trades(frame: pd.DataFrame, filename: str) -> tuple[pd.DataFrame,
     import_note = f"数据中心导入：{filename}"
     output["notes"] = existing_notes.map(lambda value: f"{value}；{import_note}" if value else import_note)
 
-    output = output.sort_values(["trade_date", "trade_time", "symbol"]).reset_index(drop=True)
-    holdings: dict[str, tuple[int, float]] = {}
-    for index, row in output.iterrows():
-        symbol = str(row["symbol"])
-        previous_shares, previous_cost = holdings.get(symbol, (0, 0.0))
-        shares = int(row["shares"])
-        price = float(row["price"])
-        fees = float(row["fee"] + row["stamp_tax"] + row["transfer_fee"] + row["other_fee"])
-        if row["side"] == "BUY":
-            calculated_shares = previous_shares + shares
-            calculated_cost = (
-                (previous_shares * previous_cost + float(row["gross_amount"]) + fees) / calculated_shares
-                if calculated_shares > 0
-                else 0.0
-            )
-            calculated_realized = 0.0
-        else:
-            if shares > previous_shares and previous_shares > 0:
-                warnings.append(f"{symbol} 存在卖出数量高于已导入买入数量的记录，请核对导出区间。")
-            calculated_shares = max(0, previous_shares - shares)
-            calculated_cost = previous_cost if calculated_shares else 0.0
-            calculated_realized = (price - previous_cost) * shares - fees if previous_shares else 0.0
+    # 时间未知的成交按当日最后排序，与追加录入时的判断保持同一口径。
+    output = (
+        output.assign(_order_time=output["trade_time"].replace("", _UNKNOWN_TIME_ORDER))
+        .sort_values(["trade_date", "_order_time", "symbol"])
+        .drop(columns="_order_time")
+        .reset_index(drop=True)
+    )
 
-        remaining = row["remaining_shares"]
-        average = row["avg_cost_after_trade"]
-        realized = row["realized_pnl"]
-        remaining_value = calculated_shares if pd.isna(remaining) else max(0, int(round(float(remaining))))
-        average_value = calculated_cost if pd.isna(average) else max(0.0, float(average))
-        realized_value = calculated_realized if pd.isna(realized) else float(realized)
-        output.at[index, "remaining_shares"] = remaining_value
-        output.at[index, "avg_cost_after_trade"] = average_value
-        output.at[index, "realized_pnl"] = realized_value
-        if pd.isna(row["position_market_value"]):
-            output.at[index, "position_market_value"] = remaining_value * price
-        if pd.isna(row["position_pct"]) and pd.notna(row["account_total_asset"]) and float(row["account_total_asset"]) > 0:
-            output.at[index, "position_pct"] = float(output.at[index, "position_market_value"]) / float(row["account_total_asset"])
-        holdings[symbol] = (remaining_value, average_value)
+    # 区间完整性只做观察和提示，不写任何数值：某只股票在本次区间里卖出多于买入，
+    # 说明区间起点晚于第一笔买入，用户需要重新导出。
+    for symbol, group in output.groupby("symbol", sort=True):
+        bought = int(group.loc[group["side"] == "BUY", "shares"].sum())
+        sold = int(group.loc[group["side"] == "SELL", "shares"].sum())
+        if sold > bought:
+            warnings.append(
+                f"{symbol} 在本次导入区间里卖出数量高于买入数量，导出区间可能不完整，请核对。"
+            )
 
     if "gross_amount" not in mapping:
         warnings.append("未找到成交金额，已按成交价格 × 成交数量计算。")
     if "account_total_asset" not in mapping:
         warnings.append("未找到账户总资产，单股审查时需要填写。")
-    output["remaining_shares"] = output["remaining_shares"].fillna(0).round().astype(int)
+    for key, label in (
+        ("remaining_shares", "成交后剩余股数"),
+        ("avg_cost_after_trade", "成交后平均成本"),
+        ("realized_pnl", "该笔已实现盈亏"),
+    ):
+        blank = int(output[key].isna().sum())
+        if blank:
+            warnings.append(
+                f"{blank} 笔成交没有{label}，已保持为空并标记「{INCOMPLETE_HISTORY_LABEL}」，不做推算。"
+            )
+    # 源文件给了负数时如实保留原值并报警，不静默夹到 0——读取侧会把它判为缺字段。
+    for key, label in (
+        ("remaining_shares", "成交后剩余股数"),
+        ("avg_cost_after_trade", "成交后平均成本"),
+    ):
+        negative = int((output[key] < 0).sum())
+        if negative:
+            warnings.append(
+                f"{negative} 笔成交的{label}是负数，已原样保留并标记「{INCOMPLETE_HISTORY_LABEL}」，请核对导出文件。"
+            )
+    unknown_fee = int(total_fee.isna().sum())
+    if unknown_fee:
+        warnings.append(
+            f"{unknown_fee} 笔成交的费用不完整，已保持为空（{FEE_UNKNOWN_LABEL}），不按 0 处理。"
+        )
+    # 可空整型：未知落盘为空字段。绝不 fillna(0)——「不知道还剩多少股」不是「剩 0 股」，
+    # 而 0 会在读侧被判成已记录事实，卖出行还会被标成「清仓」。
+    output["remaining_shares"] = output["remaining_shares"].round().astype("Int64")
     for column in ["price", "avg_cost_after_trade"]:
         output[column] = output[column].round(4)
     for column in [

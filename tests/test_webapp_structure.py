@@ -177,7 +177,8 @@ class WebappStructureTests(unittest.TestCase):
         #   - 已移除的规则库内一级/二级切换及其标签(3)
         # 记录页主从：首页与编辑子页容器(2) + 新增记录(1) + 编辑器返回(1)
         #   + 草稿提示/摘要/继续/放弃(4) + 编辑器标题与草稿状态(2)
-        self.assertLessEqual(len(self.markup.ids), 160)
+        # 事实台账：可选成交时间(1) + 按股票汇总的标题/计数/列表(3) + 可选本笔费用合计(1)
+        self.assertLessEqual(len(self.markup.ids), 165)
         # 26 + 两个子入口页签 + 编辑器返回 + 选择器取消 + 选择器确认 - 移除的两个级别切换
         # +2：共用确认弹窗的取消与确定，替掉了浏览器原生 confirm/prompt
         self.assertLessEqual(button_count, 36)
@@ -806,10 +807,12 @@ class WebappStructureTests(unittest.TestCase):
         for name in [
             "request_id",
             "trade_date",
+            "trade_time",
             "symbol",
             "side",
             "price",
             "shares",
+            "fee",
             "notes",
             "reason_tag",
             "discipline_check",
@@ -817,7 +820,29 @@ class WebappStructureTests(unittest.TestCase):
             "emotion_clear",
         ]:
             self.assertIn(f'name="{name}"', self.html)
-        self.assertNotIn('name="trade_time"', self.html)
+        # 成交时间可以补录，但绝不能必填：不知道就按「未记录」保存，
+        # 服务端也不再用提交时间顶上（见 src/personal_data.py 的 _normalize_trade_time）。
+        trade_time_input = next(
+            attrs
+            for tag, attrs in self.markup.tags
+            if tag == "input" and attrs.get("id") == "tradeTime"
+        )
+        self.assertEqual("time", trade_time_input.get("type"))
+        self.assertNotIn("required", trade_time_input)
+        self.assertIn("不填按「未记录」保存", self.html)
+        self.assertIn('trade_time: byId("tradeTime").value', self.javascript)
+        # 本笔费用合计必须可选，且必须能表达「未知」：留空不得被当成 0。
+        fee_input = next(
+            attrs
+            for tag, attrs in self.markup.tags
+            if tag == "input" and attrs.get("id") == "tradeFee"
+        )
+        self.assertEqual("number", fee_input.get("type"))
+        self.assertNotIn("required", fee_input)
+        self.assertEqual("0", fee_input.get("min"))
+        self.assertIn("留空表示费用未知", self.html)
+        self.assertIn("确实没有费用请填 0", self.html)
+        self.assertIn('fee: byId("tradeFee").value', self.javascript)
         self.assertIn("requestJson(API.trades", self.javascript)
         self.assertIn("requestJson(`${API.trades}?limit=50`)", self.javascript)
         self.assertIn("function updateTradeAmount()", self.javascript)
@@ -1029,6 +1054,119 @@ class WebappStructureTests(unittest.TestCase):
         )[0]
         self.assertIn("state.tradeDraftMeta", candidate)
         self.assertIn("askConfirm(", candidate)
+
+    def test_records_page_shows_the_ledger_facts_and_a_per_symbol_summary(self):
+        # 每笔成交必须显示成交后剩余、成交后平均成本和该笔已实现盈亏，
+        # 并且按股票给出「现在还剩多少、成本是多少、最后动的是哪天」。
+        for identifier in (
+            "recordSummaryHeading",
+            "recordSummaryCount",
+            "recordSummaryList",
+        ):
+            self.assertIn(f'id="{identifier}"', self.html)
+        home = self.html.split('id="recordsHomeView"', 1)[1].split(
+            'id="recordEditorView"', 1
+        )[0]
+        self.assertIn('id="recordSummaryList"', home)
+        # 汇总在明细之前：先回答「现在还持有多少」，再看每笔怎么来的。
+        self.assertLess(
+            home.index('id="recordSummaryList"'),
+            home.index('id="recordList"'),
+        )
+        self.assertIn("function renderRecordSummaries()", self.javascript)
+        self.assertIn("renderRecordSummaries()", self.javascript)
+        self.assertIn("state.trades?.symbol_summaries", self.javascript)
+
+        record_flow = self.javascript.split("function renderTrades()", 1)[1].split(
+            "async function loadTrades(", 1
+        )[0]
+        for field in (
+            "record.remaining_shares",
+            "record.avg_cost_after_trade",
+            "record.realized_pnl",
+            "record.operation_label",
+            "record.trade_time_label",
+            "record.incomplete_label",
+            "record.missing_fields",
+        ):
+            self.assertIn(field, record_flow)
+
+        summary_flow = self.javascript.split(
+            "function renderRecordSummaries()", 1
+        )[1].split("function renderTrades()", 1)[0]
+        for field in (
+            "item.remaining_shares",
+            "item.avg_cost",
+            "item.last_trade_date",
+            "item.last_operation_label",
+            "item.incomplete_label",
+        ):
+            self.assertIn(field, summary_flow)
+        # 汇总只复述事实：不出现仓位比例、市值占比或任何操作结论。
+        self.assertNotIn("position_pct", summary_flow)
+        self.assertIn("不算仓位比例", self.html)
+        # 汇总必须叫「成交账本」：未与持仓快照核对前不得自称当前实际持仓。
+        self.assertIn("成交账本剩余股数", summary_flow)
+        self.assertIn("成交账本平均成本", summary_flow)
+        self.assertNotIn("当前剩余股数", summary_flow)
+        self.assertNotIn("当前平均成本", summary_flow)
+        self.assertIn("不等于当前实际持仓", summary_flow)
+        # 费用未知必须传到汇总，并且数值旁边带限定语。
+        self.assertIn("item.fee_complete", summary_flow)
+        self.assertIn("item.fee_label", summary_flow)
+        self.assertIn("record.cost_fee_note", record_flow)
+        self.assertIn("record.realized_fee_note", record_flow)
+        self.assertIn("function feeNote(", self.javascript)
+        self.assertIn("fact-caveat", self.javascript)
+        self.assertIn(".fact-caveat", self.styles)
+
+        # 缺字段只标记不倒推：数字位显示「—」，绝不退回 0。
+        fact_flow = self.javascript.split("function factValue(", 1)[1].split(
+            "function renderRecordSummaries()", 1
+        )[0]
+        self.assertIn('value == null ? "—" : render(value)', fact_flow)
+        self.assertIn('未记录', self.javascript)
+        # 成本价按台账的 4 位小数显示，屏幕上的数字要能和 CSV 里那一笔对上。
+        self.assertIn("maximumFractionDigits: 4", self.web_sources["platform.js"])
+        self.assertIn("factValue(record.avg_cost_after_trade, formatCost)", record_flow)
+        self.assertIn("factValue(item.avg_cost, formatCost)", summary_flow)
+        for selector in (
+            ".record-facts dd",
+            ".record-incomplete",
+            ".summary-card",
+            ".summary-facts dt",
+        ):
+            self.assertIn(selector, self.styles)
+
+    def test_records_page_shows_an_honest_empty_state_instead_of_zeroes(self):
+        # 空数据时界面只能说「还没有」，不能给出 0 股 / ¥0 这种看起来已核对过的数字。
+        summary_flow = self.javascript.split(
+            "function renderRecordSummaries()", 1
+        )[1].split("function renderTrades()", 1)[0]
+        self.assertIn("还没有可汇总的成交", summary_flow)
+        empty_branch = summary_flow.split("还没有可汇总的成交", 1)[1]
+        self.assertNotIn("0 股", empty_branch)
+        self.assertNotIn("¥0", empty_branch)
+
+        record_flow = self.javascript.split("function renderTrades()", 1)[1].split(
+            "async function loadTrades(", 1
+        )[0]
+        self.assertIn("还没有操作记录", record_flow)
+
+        # 读不到记录时必须把汇总也清掉：绝不保留上一次的数字充当当前事实。
+        load_flow = self.javascript.split("async function loadTrades(", 1)[1].split(
+            "async function reconcileTradeReceipt(", 1
+        )[0]
+        self.assertIn('byId("recordSummaryCount").textContent = "0"', load_flow)
+        self.assertIn("没有读到成交记录，这里不显示任何数字", load_flow)
+        self.assertIn("汇总暂时无法核对", load_flow)
+
+        # HTML 里的初始空态同样不得预置数字。
+        home = self.html.split('id="recordsHomeView"', 1)[1].split(
+            'id="recordEditorView"', 1
+        )[0]
+        self.assertIn("还没有可汇总的成交", home)
+        self.assertIn("还没有操作记录", home)
 
     def test_css_is_balanced_readable_and_mobile_safe(self):
         without_comments = re.sub(r"/\*.*?\*/", "", self.styles, flags=re.DOTALL)

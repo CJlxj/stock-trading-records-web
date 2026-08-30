@@ -771,9 +771,20 @@ def run_full_review(payload: dict[str, Any], project_root: str | Path) -> dict[s
             [
                 _item("fact", f"共 {records['trade_count']} 笔记录：买入 {records['buy_count']} 笔，卖出 {records['sell_count']} 笔"),
                 _item("metric", f"累计买入 {records['total_buy_amount']:.2f} 元，累计卖出 {records['total_sell_amount']:.2f} 元"),
-                _item("metric", f"已实现盈亏 {records['realized_pnl']:.2f} 元；记录中的剩余股数 {records['remaining_shares']} 股"),
             ]
         )
+        # 台账没记下的数字不得以 0 的面貌出现：那是在陈述一个从未被记录的事实。
+        if records.get("ledger_complete", True):
+            record_items.append(
+                _item(
+                    "metric",
+                    f"已实现盈亏 {records['realized_pnl']:.2f} 元；成交账本剩余股数 {records['remaining_shares']} 股",
+                )
+            )
+        else:
+            record_items.append(
+                _item("risk", "成交台账缺少必要字段，已实现盈亏与剩余股数无法确认（历史数据不完整）")
+            )
         if records.get("contains_demo_data"):
             record_items.append(_item("risk", "当前成交摘要包含示例记录，不能作为真实交易复盘依据"))
 

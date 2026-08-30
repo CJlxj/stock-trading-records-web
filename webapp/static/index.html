@@ -235,6 +235,20 @@
         </header>
 
         <section class="records-surface" id="recordsHomeView">
+          <section class="record-summary" aria-labelledby="recordSummaryHeading">
+            <div class="section-heading">
+              <div>
+                <h2 id="recordSummaryHeading">按股票汇总 <strong id="recordSummaryCount">0</strong></h2>
+                <p>只复述已发生成交留下的事实，不算仓位比例，也不给操作结论。</p>
+              </div>
+            </div>
+            <div class="summary-list" id="recordSummaryList" role="list" aria-live="polite">
+              <div class="empty-state compact">
+                <strong>还没有可汇总的成交</strong>
+                <p>保存操作记录后，这里按股票显示剩余股数和平均成本。</p>
+              </div>
+            </div>
+          </section>
           <div class="section-heading records-home-heading">
             <div>
               <h2 id="recentRecordsHeading" tabindex="-1">历史记录 <strong id="recordCount">0</strong></h2>
@@ -281,6 +295,10 @@
                 <span>日期</span>
                 <input id="tradeDate" name="trade_date" type="date" required>
               </label>
+              <label>
+                <span>成交时间 <small>不填按「未记录」保存</small></span>
+                <input id="tradeTime" name="trade_time" type="time" step="60">
+              </label>
               <label class="select-shell">
                 <span>操作方向</span>
                 <select id="tradeSide" name="side" required>
@@ -323,6 +341,11 @@
               <label>
                 <span>成交数量</span>
                 <input id="tradeShares" name="shares" type="number" min="1" step="1" inputmode="numeric" placeholder="0" required>
+              </label>
+              <label class="form-span-two">
+                <span>本笔费用合计 <small>佣金、印花税、过户费等合计</small></span>
+                <input id="tradeFee" name="fee" type="number" min="0" step="0.01" inputmode="decimal" placeholder="留空表示费用未知">
+                <small>留空＝费用未知，成本与已实现盈亏会标注「不含未知费用」；确实没有费用请填 0。</small>
               </label>
             </div>
             </section>

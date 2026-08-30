@@ -170,6 +170,20 @@
       : "—";
   }
 
+  // 成本价按台账落盘的 4 位小数原样显示：四舍五入成 2 位会让屏幕上的数字
+  // 对不上 records/my_trades.csv 里的那一笔。
+  function formatCost(value) {
+    const number = Number(value);
+    return Number.isFinite(number)
+      ? new Intl.NumberFormat("zh-CN", {
+        style: "currency",
+        currency: "CNY",
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 4,
+      }).format(number)
+      : "—";
+  }
+
   function formatDateTime(value) {
     if (!value) return "—";
     const parsed = new Date(value);
@@ -478,6 +492,7 @@ export {
   cycleTheme,
   dataMutationBusy,
   escapeHtml,
+  formatCost,
   formatDateTime,
   formatMoney,
   initializeTheme,
