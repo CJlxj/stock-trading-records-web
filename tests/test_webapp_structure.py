@@ -82,7 +82,7 @@ class WebappStructureTests(unittest.TestCase):
             "records.js": "bindRecordEvents",
         }
 
-        self.assertIn('<script type="module" src="/app.js?v=1.0.1"></script>', self.html)
+        self.assertIn('<script type="module" src="/app.js?v=1.1.0"></script>', self.html)
         self.assertIn('from "./platform.js"', entry)
         self.assertNotIn('from "./modules/', platform)
         for module_name, binder in feature_binders.items():
@@ -117,11 +117,11 @@ class WebappStructureTests(unittest.TestCase):
         self.assertEqual(3, len(view_panels))
         for label in ["股票数据", "规则组合", "按当前规则筛选", "操作记录"]:
             self.assertIn(label, self.html)
-        self.assertIn('data-app-version="web-v1.0.1"', self.html)
-        self.assertIn('href="/styles.css?v=1.0.1"', self.html)
-        self.assertIn('src="/shared/panel-core.js?v=1.0.1"', self.html)
-        self.assertIn('type="module" src="/app.js?v=1.0.1"', self.html)
-        self.assertIn("WEB V1.0.1 · 2026-08-27", self.html)
+        self.assertIn('data-app-version="web-v1.1.0"', self.html)
+        self.assertIn('href="/styles.css?v=1.1.0"', self.html)
+        self.assertIn('src="/shared/panel-core.js?v=1.1.0"', self.html)
+        self.assertIn('type="module" src="/app.js?v=1.1.0"', self.html)
+        self.assertIn("WEB V1.1.0 · 2026-09-01", self.html)
 
     def test_day_and_night_themes_share_one_semantic_token_layer(self):
         # 主题必须由 token 层驱动：跟随系统 + <html data-theme> 手动覆盖。
@@ -141,7 +141,7 @@ class WebappStructureTests(unittest.TestCase):
         self.assertEqual([], leftover, f"styles.css 仍有硬编码颜色: {sorted(set(leftover))}")
 
         # CSP 是 script-src 'self'，引导脚本必须是独立文件并被服务端登记。
-        self.assertIn('src="/theme.js?v=1.0.1"', self.html)
+        self.assertIn('src="/theme.js?v=1.1.0"', self.html)
         self.assertIn('"/theme.js": ("theme.js"', self.server)
         self.assertIn('id="themeToggleButton"', self.html)
         self.assertIn("function cycleTheme()", self.javascript)

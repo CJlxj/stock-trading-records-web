@@ -160,9 +160,9 @@ find webapp/static shared_ui -name '*.js' -print0 | xargs -0 -n1 node --check
 
 ## 版本与发布
 
-当前网页版 **v1.0.1**（见 [CHANGELOG.md](CHANGELOG.md)）。
+当前网页版 **v1.1.0**（见 [CHANGELOG.md](CHANGELOG.md)）。
 
-仓库里有三条互相独立的版本轴：各端产品版本（`webapp/VERSION.json`）、领域合同版本（`src/panel_contract.py` 的 `panel-domain-v1.8`）、后端 API 版本（`0.9`）。各端独立走版本，git tag 按端加前缀（`web-v1.0.1`，将来 `ios-v1.0.0`）。完整规则见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#版本方案)。
+仓库里有三条互相独立的版本轴：各端产品版本（`webapp/VERSION.json`）、领域合同版本（`src/panel_contract.py` 的 `panel-domain-v1.8`）、后端 API 版本（`0.10`）。各端独立走版本，git tag 按端加前缀（`web-v1.1.0`，将来 `ios-v1.0.0`）。完整规则见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#版本方案)。
 
 ## 许可
 
