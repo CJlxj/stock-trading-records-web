@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from datetime import date
 import threading
 import time
 from pathlib import Path
@@ -33,10 +34,20 @@ class ScreeningCoordinator:
         ]:
             self._preflights.pop(key, None)
 
-    def preflight(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    def preflight(
+        self,
+        payload: dict[str, Any] | None = None,
+        *,
+        reference_date: date | None = None,
+    ) -> dict[str, Any]:
         request = deepcopy(payload or {})
         request["refresh_universe"] = False
-        result = screen_universe(self.root, request)
+        effective_reference_date = reference_date or date.today()
+        result = screen_universe(
+            self.root,
+            request,
+            today=effective_reference_date,
+        )
         meta = result["meta"]
         manifest = result["dataset_manifest"]
         blocking_errors = []
@@ -60,6 +71,7 @@ class ScreeningCoordinator:
                 "created_monotonic": time.monotonic(),
                 "request": request,
                 "input_fingerprint": meta["input_fingerprint"],
+                "reference_date": effective_reference_date,
             }
         return {
             "preflight_id": preflight_id,
@@ -105,7 +117,11 @@ class ScreeningCoordinator:
                 "预检已失效，请重新检查数据和规则。",
                 code="PREFLIGHT_EXPIRED",
             )
-        result = screen_universe(self.root, cached["request"])
+        result = screen_universe(
+            self.root,
+            cached["request"],
+            today=cached["reference_date"],
+        )
         if result["meta"]["input_fingerprint"] != cached["input_fingerprint"]:
             with self._lock:
                 self._preflights.pop(str(preflight_id), None)

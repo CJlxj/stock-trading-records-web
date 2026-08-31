@@ -139,15 +139,16 @@ class DashboardServerSecurityTests(unittest.TestCase):
         payload = captured["payload"]
         self.assertIsInstance(payload, dict)
         self.assertEqual("ok", payload["status"])
-        self.assertEqual("0.9", payload["version"])
-        self.assertEqual("1.0.1", payload["product_version"])
-        self.assertEqual("web-v1.0.1", payload["ui_version"])
-        self.assertEqual("WEB-V1.0.1", payload["release_id"])
-        self.assertEqual("WEB-20260827-002", payload["build_id"])
+        self.assertEqual("0.10", payload["version"])
+        self.assertEqual("1.1.0", payload["product_version"])
+        self.assertEqual("web-v1.1.0", payload["ui_version"])
+        self.assertEqual("WEB-V1.1.0", payload["release_id"])
+        self.assertEqual("WEB-20260901-001", payload["build_id"])
         self.assertEqual(
-            "2026-08-27T10:00:00+08:00",
+            "2026-09-01T02:15:16+08:00",
             payload["released_at"],
         )
+        self.assertEqual("StockRuleReview/0.10", web_server.DashboardHandler.server_version)
         self.assertEqual("panel-domain-v1.8", payload["domain_contract_version"])
         self.assertEqual(web_server.CSRF_TOKEN, payload["csrf_token"])
         self.assertGreaterEqual(len(payload["csrf_token"]), 32)
@@ -238,7 +239,7 @@ class DashboardServerSecurityTests(unittest.TestCase):
 
     def test_web_module_assets_reach_the_static_handler(self):
         expected_assets = {
-            "/app.js?v=1.0.1": ("app.js", "text/javascript; charset=utf-8"),
+            "/app.js?v=1.1.0": ("app.js", "text/javascript; charset=utf-8"),
             "/platform.js": ("platform.js", "text/javascript; charset=utf-8"),
             "/modules/data.js": ("modules/data.js", "text/javascript; charset=utf-8"),
             "/modules/rules.js": ("modules/rules.js", "text/javascript; charset=utf-8"),

@@ -144,11 +144,25 @@ find webapp/static shared_ui -name '*.js' -print0 | xargs -0 -n1 node --check
 
 单元测试使用 `tests/market_fixture.py` 中的确定性合成数据，绝大多数在临时目录运行。例外是 `tests/test_webapp_server_security.py` 的路由连通性用例——它以真实项目根跑通所有已声明路由，会在 `history/` 下留下一个 `screenings.sqlite3`。该文件已被 `.gitignore` 排除，可以直接删除。
 
+### 共享合成场景
+
+`tests/panel_scenario_fixture.py` 提供多个测试共用的合成场景。**四个基础场景和功能 1.2 增量场景全部是临时合成数据，不包含任何真实行情、真实证券名称或个人成交记录**：
+
+| 场景 | 内容 |
+|---|---|
+| `EMPTY_FIRST_RUN` | 能正式启动但没有任何用户运行数据：无本地股票、无行情、无用户创建的规则组合、无筛选批次、无成交、无持仓、无账户资产 |
+| `READY_CURRENT_FLOW` | 当前能力的最小完整链路：三只合成测试股票 → 规则组合 → 筛选批次（一个候选、一个一级未通过、一个二级未通过）→ 首次买入/加仓/减仓三笔成交 |
+| `ZERO_CANDIDATE` | 行情、股票库、规则组合都有效，筛选成功完成，但最终候选为零 |
+| `LEDGER_INCOMPLETE` | 在完整链路之上，只让一只股票的一段历史成交缺少成交后剩余股数、平均成本、已实现盈亏与费用事实 |
+| `TIME_ORDER_AMBIGUOUS` | 在完整链路之上，只增加同股同日一笔时间明确、一笔时间未记录的成交，用于验证顺序待核对时保留原始明细但不选择汇总依据 |
+
+每个构建函数都显式接收 `target_root`，只写入调用方提供的临时目录，并在写入前拒绝任何指向仓库内部的路径。所有派生结果（规则库、筛选批次、成交回执、账本投影）都由正式业务代码生成，不手写。场景使用固定业务日期，不读取当前日期、不访问网络，因此两次构建得到相同的业务结果。测试结束后临时目录自动清理，不会有场景文件留在工作树。
+
 ## 版本与发布
 
-当前网页版 **v1.0.1**（见 [CHANGELOG.md](CHANGELOG.md)）。
+当前网页版 **v1.1.0**（见 [CHANGELOG.md](CHANGELOG.md)）。
 
-仓库里有三条互相独立的版本轴：各端产品版本（`webapp/VERSION.json`）、领域合同版本（`src/panel_contract.py` 的 `panel-domain-v1.8`）、后端 API 版本（`0.9`）。各端独立走版本，git tag 按端加前缀（`web-v1.0.1`，将来 `ios-v1.0.0`）。完整规则见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#版本方案)。
+仓库里有三条互相独立的版本轴：各端产品版本（`webapp/VERSION.json`）、领域合同版本（`src/panel_contract.py` 的 `panel-domain-v1.8`）、后端 API 版本（`0.10`）。各端独立走版本，git tag 按端加前缀（`web-v1.1.0`，将来 `ios-v1.0.0`）。完整规则见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#版本方案)。
 
 ## 许可
 

@@ -7,6 +7,7 @@ import {
   byId,
   clean,
   escapeHtml,
+  formatCost,
   formatMoney,
   navigate,
   newRequestId,
@@ -303,10 +304,12 @@ import { screeningFreshness } from "./screening.js";
       schemaVersion: TRADE_DRAFT_SCHEMA,
       requestId: byId("tradeRequestId").value,
       tradeDate: byId("tradeDate").value,
+      tradeTime: byId("tradeTime").value,
       side: byId("tradeSide").value,
       symbol: byId("tradeSymbol").value,
       price: byId("tradePrice").value,
       shares: byId("tradeShares").value,
+      fee: byId("tradeFee").value,
       notes: byId("tradeNotes").value,
       reasonTags: checkedTradeValues("reason_tag"),
       disciplineChecks: checkedTradeValues("discipline_check"),
@@ -365,10 +368,12 @@ import { screeningFreshness } from "./screening.js";
     // 恢复时 request_id 保持不变，直到正式保存确认成功或用户明确放弃。
     byId("tradeRequestId").value = clean(payload.requestId);
     byId("tradeDate").value = clean(payload.tradeDate);
+    byId("tradeTime").value = clean(payload.tradeTime);
     byId("tradeSide").value = payload.side === "SELL" ? "SELL" : "BUY";
     byId("tradeSymbol").value = clean(payload.symbol);
     byId("tradePrice").value = clean(payload.price);
     byId("tradeShares").value = clean(payload.shares);
+    byId("tradeFee").value = clean(payload.fee);
     byId("tradeNotes").value = clean(payload.notes);
     const restore = (name, values) => {
       document.querySelectorAll(`#tradeForm input[name="${name}"]`).forEach((input) => {
@@ -450,8 +455,10 @@ import { screeningFreshness } from "./screening.js";
     const defaultDate = state.bootstrap?.today || new Date().toISOString().slice(0, 10);
     return Boolean(
       clean(byId("tradeSymbol").value)
+      || clean(byId("tradeTime").value)
       || clean(byId("tradePrice").value)
       || clean(byId("tradeShares").value)
+      || clean(byId("tradeFee").value)
       || clean(byId("tradeNotes").value)
       || byId("tradeSide").value !== "BUY"
       || (clean(byId("tradeDate").value) && byId("tradeDate").value !== defaultDate)
@@ -470,23 +477,96 @@ import { screeningFreshness } from "./screening.js";
     return PanelCore.recordStatusClass(value);
   }
 
+  // 台账只复述服务端已经写下的事实。数字缺失一律显示「—」，
+  // 前端绝不用别的字段倒推，也不填默认值。
+  function factValue(value, render) {
+    return value == null ? "—" : render(value);
+  }
+
+  function factItem(label, value, caveat = "") {
+    return `<div><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}${caveat}</dd></div>`;
+  }
+
+  function shareCount(value) {
+    return factValue(value, (shares) => `${shares} 股`);
+  }
+
+  function incompleteNote(label, details) {
+    const reasons = (details || []).filter(Boolean).join("、");
+    return label
+      ? `<p class="record-incomplete">${escapeHtml(label)}${reasons ? `：${escapeHtml(reasons)}` : ""}</p>`
+      : "";
+  }
+
+  // 费用未知时数值仍然给出，但必须紧跟「不含未知费用」，不得当成精确完整值。
+  function feeNote(note) {
+    return note ? `<span class="fact-caveat">${escapeHtml(note)}</span>` : "";
+  }
+
+  function recordMoment(date, timeLabel) {
+    return `${clean(date) || "—"} ${clean(timeLabel) || "未记录"}`;
+  }
+
+  function renderRecordSummaries() {
+    const summaries = state.trades?.symbol_summaries || [];
+    byId("recordSummaryCount").textContent = String(summaries.length);
+    byId("recordSummaryList").innerHTML = summaries.length
+      ? summaries.map((item) => {
+        const orderKnown = item.order_status === "ORDER_KNOWN";
+        const orderAmbiguous = item.order_status === "ORDER_AMBIGUOUS";
+        const orderLabel = clean(item.order_status_label)
+          || (orderKnown ? "顺序明确" : "顺序待核对");
+        const basisCopy = orderKnown && clean(item.basis_record_ref)
+          ? `账本汇总依据：${escapeHtml(item.basis_record_ref)} · ${escapeHtml(recordMoment(item.last_trade_date, item.last_trade_time_label))} · ${escapeHtml(item.last_operation_label || "成交")}。尚未与持仓快照核对，不等于当前实际持仓。`
+          : "同日成交顺序待核对，因此未选择汇总依据；原始成交明细仍保留。";
+        return `<article class="summary-card" role="listitem">
+          <div class="summary-stock">
+            <strong>${escapeHtml(item.stock_name || item.symbol)}</strong>
+            <small>${escapeHtml(item.symbol)} · 共 ${item.trade_count} 笔成交</small>
+          </div>
+          <span class="record-status ${orderKnown ? "is-ready" : "is-warning"}">${escapeHtml(orderLabel)}</span>
+          <dl class="summary-facts">
+            ${factItem("成交账本剩余股数", shareCount(item.remaining_shares))}
+            ${factItem("成交账本平均成本", factValue(item.avg_cost, formatCost), feeNote(item.fee_complete ? "" : "不含未知费用"))}
+            ${factItem("最后操作日期", orderKnown ? (clean(item.last_trade_date) || "—") : "—")}
+          </dl>
+          <p class="summary-basis">${basisCopy}</p>
+          ${incompleteNote(orderAmbiguous ? "顺序待核对" : "", item.order_reasons)}
+          ${incompleteNote(item.incomplete_label, item.incomplete_reasons)}
+          ${incompleteNote(item.fee_label, item.fee_reasons)}
+        </article>`;
+      }).join("")
+      : `<div class="empty-state compact">
+        <strong>还没有可汇总的成交</strong>
+        <p>保存操作记录后，这里按股票显示成交账本剩余股数和平均成本。</p>
+      </div>`;
+  }
+
   function renderTrades() {
     const payload = state.trades || { records: [], count: 0 };
     const records = payload.records || [];
     byId("recordCount").textContent = String(payload.count || 0);
     byId("recordList").innerHTML = records.length
       ? records.map((record) => `<article class="record-card${clean(record.request_id) && clean(record.request_id) === clean(state.highlightedRecordId) ? " is-highlighted" : ""}" role="listitem">
-        <div class="record-side ${record.side === "BUY" ? "is-buy" : "is-sell"}">${record.side === "BUY" ? "买" : "卖"}</div>
+        <div class="record-side ${record.side === "BUY" ? "is-buy" : record.side === "SELL" ? "is-sell" : ""}">${record.side === "BUY" ? "买" : record.side === "SELL" ? "卖" : "—"}</div>
         <div class="record-stock">
           <strong>${escapeHtml(record.stock_name || record.symbol)}</strong>
-          <small>${escapeHtml(record.operation || (record.side === "BUY" ? "买入" : "卖出"))} · ${escapeHtml(record.symbol)} · ${escapeHtml(record.trade_date)} ${escapeHtml(clean(record.trade_time).slice(0, 5))}</small>
+          <small>${escapeHtml(record.operation_label || record.operation || (record.side === "BUY" ? "买入" : "卖出"))} · ${escapeHtml(record.symbol)} · ${escapeHtml(recordMoment(record.trade_date, record.trade_time_label))}</small>
         </div>
         <div class="record-value">
           <strong>${record.price == null ? "—" : Number(record.price).toFixed(2)} × ${record.shares ?? "—"}</strong>
           <small>${formatMoney(record.gross_amount)}</small>
         </div>
         <span class="record-status ${recordStatusClass(record.rule_status)}">${escapeHtml(record.rule_status || "历史未审查")}</span>
+        <dl class="record-facts">
+          ${factItem("成交后剩余股数", shareCount(record.remaining_shares))}
+          ${factItem("成交后平均成本", factValue(record.avg_cost_after_trade, formatCost), feeNote(record.cost_fee_note))}
+          ${factItem("该笔已实现盈亏", factValue(record.realized_pnl, formatMoney), feeNote(record.realized_fee_note))}
+          ${factItem("本笔费用合计", factValue(record.fee, formatMoney))}
+        </dl>
+        ${incompleteNote(record.incomplete_label, (record.missing_fields || []).length ? [`缺少 ${(record.missing_fields || []).join("、")}`] : [])}
         <div class="record-evidence">
+          <p><strong>记录引用</strong>${escapeHtml(record.record_ref || "—")}</p>
           <p><strong>操作依据</strong>${escapeHtml(record.notes || "未记录")}</p>
           <p><strong>情绪</strong>${escapeHtml(record.emotion || "未记录")}</p>
         </div>
@@ -495,6 +575,7 @@ import { screeningFreshness } from "./screening.js";
         <strong>还没有操作记录</strong>
         <p>保存后会显示在这里。</p>
       </div>`;
+    renderRecordSummaries();
   }
 
   async function loadTrades(force = false) {
@@ -514,6 +595,12 @@ import { screeningFreshness } from "./screening.js";
         <strong>最近记录暂时无法读取</strong>
         <p>${escapeHtml(error.message)}</p>
       </div>`;
+      // 汇总只能来自成交事实：读不到记录时不保留上一次的数字。
+      byId("recordSummaryCount").textContent = "0";
+      byId("recordSummaryList").innerHTML = `<div class="empty-state compact">
+        <strong>汇总暂时无法核对</strong>
+        <p>没有读到成交记录，这里不显示任何数字。</p>
+      </div>`;
       setFeedback("tradeFeedback", error.message, true);
       showToast(error.message, true);
     } finally {
@@ -523,7 +610,8 @@ import { screeningFreshness } from "./screening.js";
   }
 
   // 回执不确定时唯一可信的判断方式：重新读取最近记录，按 request_id 核对是否已落库。
-  // 服务端每条记录都回传 request_id（source 去前缀），因此不需要新增接口或字段。
+  // 服务端每条手工记录都回传 request_id（source 去前缀）；
+  // 读取用的 record_ref 不替代幂等键，这段核对流程仍只看 request_id。
   async function reconcileTradeReceipt(requestId) {
     const payload = await requestJson(`${API.trades}?limit=50`);
     const saved = (payload.records || []).some(
@@ -593,11 +681,13 @@ import { screeningFreshness } from "./screening.js";
         body: JSON.stringify({
           request_id: requestId,
           trade_date: byId("tradeDate").value,
+          trade_time: byId("tradeTime").value,
           symbol: stock.symbol,
           stock_name: stock?.stock_name || "",
           side: byId("tradeSide").value,
           price: byId("tradePrice").value,
           shares: byId("tradeShares").value,
+          fee: byId("tradeFee").value,
           notes: byId("tradeNotes").value,
           reason_tags: checklist.reasonTags,
           discipline_checks: checklist.disciplineChecks,

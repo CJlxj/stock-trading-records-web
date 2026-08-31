@@ -19,7 +19,12 @@ from src.io_loader import (
     validate_timeframe,
 )
 from src.position_sizer import classify_position, suggest_next_trade_capacity
-from src.personal_data import personal_data_status
+from src.personal_data import (
+    ORDER_AMBIGUOUS,
+    list_trade_records,
+    personal_data_status,
+)
+from src.rules.registry import RuleRegistry
 from src.selection_engine import evaluate_selection
 from src.signal_engine import evaluate_latest, load_rules
 from src.stock_library import local_stock_name_map
@@ -99,7 +104,7 @@ def _to_float(value: Any, default: float | None = None) -> float | None:
         return default
 
 
-def _to_int(value: Any, default: int = 0) -> int:
+def _to_int(value: Any, default: int | None = 0) -> int | None:
     if value in (None, ""):
         return default
     try:
@@ -278,7 +283,16 @@ def _record_summary(project_root: Path, symbol: str, latest_price: float, enable
         return {"message": "未找到 records/my_trades.csv", "timeline": []}
 
     trades = load_trades(trades_path)
-    summary = summarize_symbol(trades, symbol, latest_price=latest_price)
+    canonical_summaries = list_trade_records(
+        project_root, symbol=symbol, limit=1
+    )["symbol_summaries"]
+    canonical_summary = canonical_summaries[0] if canonical_summaries else None
+    summary = summarize_symbol(
+        trades,
+        symbol,
+        latest_price=latest_price,
+        ledger_summary=canonical_summary,
+    )
     if "message" in summary:
         summary["timeline"] = []
         return summary
@@ -289,7 +303,13 @@ def _record_summary(project_root: Path, symbol: str, latest_price: float, enable
     demo_mask = sources.eq("demo") | notes.str.contains("demo|示例", regex=True)
     summary["demo_row_count"] = int(demo_mask.sum())
     summary["contains_demo_data"] = bool(demo_mask.any())
-    rows = rows.sort_values([column for column in ["trade_date", "trade_time"] if column in rows.columns])
+    rows = rows.sort_values(
+        [
+            column
+            for column in ["trade_date", "trade_time", "record_ref"]
+            if column in rows.columns
+        ]
+    )
     timeline = []
     for _, row in rows.tail(6).iterrows():
         side = str(row.get("side", "")).upper()
@@ -350,6 +370,10 @@ def get_bootstrap(project_root: str | Path) -> dict[str, Any]:
     watch_symbols = _symbols_from_frame(watchlist)
     position_symbols = _symbols_from_frame(positions)
     trade_symbols = _symbols_from_frame(trades)
+    trade_summaries = {
+        summary["symbol"]: summary
+        for summary in list_trade_records(root, limit=1)["symbol_summaries"]
+    }
 
     library_names = local_stock_name_map(root)
     library_symbols = set(library_names)
@@ -388,15 +412,36 @@ def get_bootstrap(project_root: str | Path) -> dict[str, Any]:
         watch_row = _latest_symbol_row(watchlist, symbol, "last_review_date")
         position_row = _latest_symbol_row(positions, symbol, "snapshot_date")
         trade_row = _latest_symbol_row(trades, symbol, "trade_date")
+        trade_summary = trade_summaries.get(symbol, {})
+        has_trade_summary = bool(trade_summary)
+        trade_shares_unknown = (
+            has_trade_summary and trade_summary.get("remaining_shares") is None
+        )
+        trade_cost_unknown = (
+            has_trade_summary and trade_summary.get("avg_cost") is None
+        )
         account_default = _to_float(
             position_row.get("account_total_asset"), _to_float(trade_row.get("account_total_asset"), 140000)
         )
+        trade_shares_default = (
+            None
+            if trade_shares_unknown
+            else _to_int(trade_summary.get("remaining_shares"), 0)
+        )
         shares_default = _to_int(
-            position_row.get("shares_total"), _to_int(trade_row.get("remaining_shares"), 0)
+            position_row.get("shares_total"), trade_shares_default
+        )
+        trade_cost_default = (
+            None
+            if trade_cost_unknown
+            else _to_float(
+                trade_summary.get("avg_cost"),
+                _to_float(watch_row.get("entry_price")),
+            )
         )
         cost_default = _to_float(
             position_row.get("avg_cost"),
-            _to_float(trade_row.get("avg_cost_after_trade"), _to_float(watch_row.get("entry_price"))),
+            trade_cost_default,
         )
         latest_day = _latest_day_summary(root, symbol)
         sources = []
@@ -505,12 +550,31 @@ def run_full_review(payload: dict[str, Any], project_root: str | Path) -> dict[s
     planned_add_amount = max(0.0, _to_float(payload.get("planned_add_amount"), 0.0) or 0.0)
     records = _record_summary(root, symbol, current_price, use_local_records)
     if use_local_records and "message" not in records:
+        independent_position = (
+            payload.get("position_shares") not in (None, "")
+            or _to_float(position_row.get("shares_total")) is not None
+        )
+        position_unconfirmed = (
+            records.get("order_status") == ORDER_AMBIGUOUS
+            or records.get("remaining_shares") is None
+        )
+        if position_unconfirmed and not independent_position:
+            if records.get("order_status") == ORDER_AMBIGUOUS:
+                reason = "成交顺序待核对"
+                action = "请先核对成交顺序或提供独立持仓数量。"
+            else:
+                reason = "历史数据不完整"
+                action = "请补充独立持仓数量后再进行复盘。"
+            raise ValueError(
+                f"{reason}，无法从成交记录确认当前持仓；{action}"
+            )
         if payload.get("account_total_asset") in (None, "") and _to_float(position_row.get("account_total_asset")) is None:
             account_asset = _to_float(records.get("account_total_asset"), account_asset)
         if payload.get("position_shares") in (None, "") and _to_float(position_row.get("shares_total")) is None:
             shares = _to_int(records.get("remaining_shares"), shares)
         if payload.get("avg_cost") in (None, "") and _to_float(position_row.get("avg_cost")) is None:
-            avg_cost = _to_float(records.get("avg_cost"), avg_cost)
+            # 有成交台账时，计划/观察价格不能冒充实际平均成本。
+            avg_cost = _to_float(records.get("avg_cost"))
 
     if not account_asset or account_asset <= 0:
         raise ValueError("账户总资产必须大于 0。")
@@ -535,6 +599,8 @@ def run_full_review(payload: dict[str, Any], project_root: str | Path) -> dict[s
         rules=rules,
         entry_price=signal_entry_price,
         market_context=market_context,
+        # 显式给出本次复盘所属实例的规则库，不再让 signal_engine 回退到代码所在目录。
+        registry=RuleRegistry(root),
     )
     latest = signal.latest
     selection = evaluate_selection(market_df, symbol, stock_name, rules)
@@ -771,9 +837,27 @@ def run_full_review(payload: dict[str, Any], project_root: str | Path) -> dict[s
             [
                 _item("fact", f"共 {records['trade_count']} 笔记录：买入 {records['buy_count']} 笔，卖出 {records['sell_count']} 笔"),
                 _item("metric", f"累计买入 {records['total_buy_amount']:.2f} 元，累计卖出 {records['total_sell_amount']:.2f} 元"),
-                _item("metric", f"已实现盈亏 {records['realized_pnl']:.2f} 元；记录中的剩余股数 {records['remaining_shares']} 股"),
             ]
         )
+        # 台账没记下的数字不得以 0 的面貌出现：那是在陈述一个从未被记录的事实。
+        if records.get("order_status") == ORDER_AMBIGUOUS:
+            record_items.append(
+                _item(
+                    "risk",
+                    "成交顺序待核对，成交账本剩余股数、平均成本和最后成交依据无法确认",
+                )
+            )
+        elif records.get("ledger_complete", True):
+            record_items.append(
+                _item(
+                    "metric",
+                    f"已实现盈亏 {records['realized_pnl']:.2f} 元；成交账本剩余股数 {records['remaining_shares']} 股",
+                )
+            )
+        else:
+            record_items.append(
+                _item("risk", "成交台账缺少必要字段，已实现盈亏与剩余股数无法确认（历史数据不完整）")
+            )
         if records.get("contains_demo_data"):
             record_items.append(_item("risk", "当前成交摘要包含示例记录，不能作为真实交易复盘依据"))
 

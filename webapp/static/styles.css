@@ -643,6 +643,7 @@ textarea:hover {
 
 .field-stack > span small,
 .form-grid label > span small,
+.form-grid label > small,
 .stock-picker > small {
   color: var(--text-muted);
   font-weight: 400;
@@ -3455,6 +3456,7 @@ textarea:hover {
   margin: 0;
   color: var(--text-muted);
   font-size: 12px;
+  overflow-wrap: anywhere;
 }
 
 .record-evidence p > strong {
@@ -3462,6 +3464,103 @@ textarea:hover {
   color: var(--text-soft);
   font-size: 12px;
   font-weight: 500;
+}
+
+/* 成交后事实：剩余股数、平均成本、该笔已实现盈亏。
+   每一项都直接来自那笔成交写下的数字，缺失时显示「—」而不是 0。 */
+.record-facts,
+.summary-facts {
+  display: flex;
+  margin: 0;
+  flex-wrap: wrap;
+  gap: 6px 20px;
+}
+
+.record-facts > div,
+.summary-facts > div {
+  display: grid;
+  gap: 2px;
+}
+
+.record-facts dt,
+.summary-facts dt {
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 400;
+}
+
+.record-facts dd,
+.summary-facts dd {
+  margin: 0;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 费用未知时的限定语紧跟数字：数值本身仍然给出，但它不是精确完整值 */
+.fact-caveat {
+  display: block;
+  color: var(--warning-text);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.record-card > .record-facts,
+.record-card > .record-incomplete {
+  grid-column: 2 / -1;
+}
+
+/* 历史缺字段时只标记，不倒推：数字位保持「—」，这里说明缺了什么。 */
+.record-incomplete {
+  width: max-content;
+  max-width: 100%;
+  margin: 0;
+  padding: 3px 9px;
+  border: 1px solid var(--warning-border);
+  border-radius: 7px;
+  background: var(--warning-soft);
+  color: var(--warning-text);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+/* 按股票汇总：与历史明细同一份事实，顺序可确认时才选择依据记录。 */
+.summary-list {
+  display: grid;
+  gap: 10px;
+}
+
+.summary-card {
+  display: grid;
+  grid-template-columns: minmax(140px, 1fr) auto;
+  align-items: center;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  gap: 10px 16px;
+}
+
+.summary-stock strong,
+.summary-stock small {
+  display: block;
+}
+
+.summary-stock strong {
+  margin-bottom: 2px;
+  font-weight: 600;
+}
+
+.summary-card > .summary-facts,
+.summary-card > .summary-basis,
+.summary-card > .record-incomplete {
+  grid-column: 1 / -1;
+}
+
+.summary-basis {
+  margin: 0;
+  overflow-wrap: anywhere;
 }
 
 /* ==========================================================================
@@ -4147,6 +4246,8 @@ textarea:hover {
 .record-stock small,
 .record-value small,
 .record-evidence p,
+.summary-stock small,
+.summary-basis,
 .evidence-strength,
 .evidence-order,
 .candidate-stock small,
@@ -4574,6 +4675,20 @@ textarea:hover {
 
   .record-evidence {
     grid-column: 2;
+  }
+
+  .record-card > .record-facts,
+  .record-card > .record-incomplete {
+    grid-column: 2;
+  }
+
+  .summary-card {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .summary-card > .record-status {
+    grid-column: 1;
+    width: max-content;
   }
 
   .modal {

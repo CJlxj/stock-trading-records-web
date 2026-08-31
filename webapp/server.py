@@ -22,12 +22,12 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 WEB_RELEASE = {
     "channel": "web",
-    "version": "1.0.1",
-    "release_id": "WEB-V1.0.1",
-    "build_id": "WEB-20260827-002",
-    "released_at": "2026-08-27T10:00:00+08:00",
-    "ui_version": "web-v1.0.1",
-    "backend_api_version": "0.9",
+    "version": "1.1.0",
+    "release_id": "WEB-V1.1.0",
+    "build_id": "WEB-20260901-001",
+    "released_at": "2026-09-01T02:15:16+08:00",
+    "ui_version": "web-v1.1.0",
+    "backend_api_version": "0.10",
 }
 
 from src.fundamental_data import (
@@ -223,7 +223,7 @@ class DashboardServer(ThreadingHTTPServer):
 
 
 class DashboardHandler(BaseHTTPRequestHandler):
-    server_version = "StockRuleReview/0.9"
+    server_version = "StockRuleReview/0.10"
 
     def _send_json(self, payload: Any, status: int = HTTPStatus.OK) -> None:
         body = json.dumps(payload, ensure_ascii=False, allow_nan=False).encode("utf-8")

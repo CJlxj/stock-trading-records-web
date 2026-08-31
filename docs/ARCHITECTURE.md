@@ -59,11 +59,11 @@ stock-trading-records-web/
 
 | 版本轴 | 位置 | 当前值 | 什么时候升 |
 |---|---|---|---|
-| 各端产品版本 | 各端自己的 `VERSION.json` | web `1.0.1` | 该端的功能或界面发生变化 |
+| 各端产品版本 | 各端自己的 `VERSION.json` | web `1.1.0` | 该端的功能或界面发生变化 |
 | 领域合同版本 | `src/panel_contract.py` 的 `DOMAIN_CONTRACT_VERSION` | `panel-domain-v1.8` | 候选状态、证据含义或纪律枚举的**语义**变化 |
-| 后端 API 版本 | `VERSION.json` 的 `backend_api_version` | `0.9` | HTTP 接口的形状变化 |
+| 后端 API 版本 | `VERSION.json` 的 `backend_api_version` | `0.10` | HTTP 接口的形状变化 |
 
-网页版是 `1.0.1` 而合同是 `v1.8`，这不是笔误：产品版本在开源首发时重新计数，合同版本延续既有谱系，两者不在同一条轴上。
+网页版是 `1.1.0` 而合同是 `v1.8`，这不是笔误：产品版本在开源首发时重新计数，合同版本延续既有谱系，两者不在同一条轴上。
 
 ### 各端独立走版本
 
@@ -81,7 +81,7 @@ stock-trading-records-web/
 按端加前缀，避免两个端的 tag 互相打架：
 
 ```text
-web-v1.0.1
+web-v1.1.0
 ios-v1.0.0     （将来）
 ```
 

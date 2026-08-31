@@ -6,10 +6,10 @@
   <meta name="color-scheme" content="light dark">
   <meta name="theme-color" content="#f7f4ed">
   <title>收盘候选筛选</title>
-  <link rel="stylesheet" href="/styles.css?v=1.0.1">
-  <script src="/theme.js?v=1.0.1"></script>
+  <link rel="stylesheet" href="/styles.css?v=1.1.0">
+  <script src="/theme.js?v=1.1.0"></script>
 </head>
-<body data-app-version="web-v1.0.1">
+<body data-app-version="web-v1.1.0">
   <a class="skip-link" href="#appMain">跳到主要内容</a>
 
   <header class="app-header">
@@ -39,7 +39,7 @@
           <button class="icon-button theme-toggle" id="themeToggleButton" type="button" aria-label="显示模式：跟随系统" title="显示模式：跟随系统">
             <span class="theme-toggle-glyph" aria-hidden="true">◐</span>
           </button>
-          <span class="release-badge" title="发布于 2026-08-27（Asia/Shanghai）">WEB V1.0.1 · 2026-08-27</span>
+          <span class="release-badge" title="发布于 2026-09-01（Asia/Shanghai）">WEB V1.1.0 · 2026-09-01</span>
         </div>
         <div class="connection-status" id="connectionStatus" role="status" aria-live="polite">
           <span aria-hidden="true"></span>
@@ -235,9 +235,24 @@
         </header>
 
         <section class="records-surface" id="recordsHomeView">
+          <section class="record-summary" aria-labelledby="recordSummaryHeading">
+            <div class="section-heading">
+              <div>
+                <h2 id="recordSummaryHeading">按股票汇总 <strong id="recordSummaryCount">0</strong></h2>
+                <p>只复述已发生成交留下的事实，不算仓位比例，也不给操作结论。</p>
+              </div>
+            </div>
+            <div class="summary-list" id="recordSummaryList" role="list" aria-live="polite">
+              <div class="empty-state compact">
+                <strong>还没有可汇总的成交</strong>
+                <p>保存操作记录后，这里按股票显示剩余股数和平均成本。</p>
+              </div>
+            </div>
+          </section>
           <div class="section-heading records-home-heading">
             <div>
               <h2 id="recentRecordsHeading" tabindex="-1">历史记录 <strong id="recordCount">0</strong></h2>
+              <p>列表位置仅用于稳定展示，不代表同日未知时间成交的业务先后。</p>
             </div>
             <button class="button button-primary button-compact" id="newRecordButton" type="button">新增记录</button>
           </div>
@@ -281,6 +296,10 @@
                 <span>日期</span>
                 <input id="tradeDate" name="trade_date" type="date" required>
               </label>
+              <label>
+                <span>成交时间 <small>不填按「未记录」保存</small></span>
+                <input id="tradeTime" name="trade_time" type="time" step="60">
+              </label>
               <label class="select-shell">
                 <span>操作方向</span>
                 <select id="tradeSide" name="side" required>
@@ -323,6 +342,11 @@
               <label>
                 <span>成交数量</span>
                 <input id="tradeShares" name="shares" type="number" min="1" step="1" inputmode="numeric" placeholder="0" required>
+              </label>
+              <label class="form-span-two">
+                <span>本笔费用合计 <small>佣金、印花税、过户费等合计</small></span>
+                <input id="tradeFee" name="fee" type="number" min="0" step="0.01" inputmode="decimal" placeholder="留空表示费用未知">
+                <small>留空＝费用未知，成本与已实现盈亏会标注「不含未知费用」；确实没有费用请填 0。</small>
               </label>
             </div>
             </section>
@@ -604,7 +628,7 @@
 
   <div class="toast" id="toast" role="status" aria-live="polite" aria-atomic="true"></div>
 
-  <script src="/shared/panel-core.js?v=1.0.1"></script>
-  <script type="module" src="/app.js?v=1.0.1"></script>
+  <script src="/shared/panel-core.js?v=1.1.0"></script>
+  <script type="module" src="/app.js?v=1.1.0"></script>
 </body>
 </html>
