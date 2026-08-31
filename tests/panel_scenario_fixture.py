@@ -12,9 +12,11 @@
 4. 写入前先确认目标目录在仓库之外，避免误改开发目录里的真实运行数据。
 5. 使用固定业务日期与固定测试代码，不读取当前日期、不访问网络。
 
-第一版共提供四个场景：``EMPTY_FIRST_RUN``（隔离根与空实例）、
+第一版提供四个基础场景：``EMPTY_FIRST_RUN``（隔离根与空实例）、
 ``READY_CURRENT_FLOW``（当前能力的最小完整链路）、``ZERO_CANDIDATE``
 （筛选成功但零候选）、``LEDGER_INCOMPLETE``（一段历史成交缺必要字段）。
+功能 1.2 在此基础上增量增加 ``TIME_ORDER_AMBIGUOUS``，只制造同日成交顺序
+无法确认这一项局部状态，不复制行情、规则或筛选数据。
 全部是临时合成场景，不含任何真实行情或个人数据。
 后续场景由真正需要它们的功能增量扩展，共享场景只建立一次，
 不为每个功能重复造一套平行数据。
@@ -396,4 +398,54 @@ def build_ledger_incomplete(target_root: str | Path) -> dict[str, Any]:
         "screening": screening,
         "imported": imported,
         "trades": trades,
+    }
+
+
+TIME_ORDER_AMBIGUOUS = "TIME_ORDER_AMBIGUOUS"
+TIME_ORDER_AMBIGUOUS_DATE = "2026-06-18"
+TIME_ORDER_AMBIGUOUS_TRADES: tuple[dict[str, Any], ...] = (
+    {
+        "request_id": "scenario-order-known-0004",
+        "trade_date": TIME_ORDER_AMBIGUOUS_DATE,
+        "trade_time": "09:40",
+        "side": "BUY",
+        "price": 51.20,
+        "shares": 100,
+        "fee": 1.20,
+    },
+    {
+        "request_id": "scenario-order-unknown-0005",
+        "trade_date": TIME_ORDER_AMBIGUOUS_DATE,
+        "trade_time": "",
+        "side": "SELL",
+        "price": 52.10,
+        "shares": 50,
+        "fee": 1.10,
+    },
+)
+
+
+def build_time_order_ambiguous(target_root: str | Path) -> dict[str, Any]:
+    """TIME_ORDER_AMBIGUOUS：复用完整链路，只增加同日已知＋未知时间成交。
+
+    两笔都通过正式追加入口保存；第二笔时间未知，因此原始成交仍可见，
+    但该股票不能选择最后成交或账本汇总依据。
+    """
+    scenario = build_ready_current_flow(target_root)
+    root = scenario["root"]
+    appended = [
+        append_trade_record(
+            root,
+            {
+                **trade,
+                "symbol": CANDIDATE_SYMBOL,
+                "stock_name": dict(SCENARIO_STOCKS)[CANDIDATE_SYMBOL],
+            },
+        )["record"]
+        for trade in TIME_ORDER_AMBIGUOUS_TRADES
+    ]
+    return {
+        **scenario,
+        "scenario": TIME_ORDER_AMBIGUOUS,
+        "ambiguous_trades": appended,
     }

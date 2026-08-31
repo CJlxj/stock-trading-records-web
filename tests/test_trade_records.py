@@ -202,19 +202,19 @@ class TradeRecordTests(unittest.TestCase):
             }
             first = append_trade_record(
                 root,
-                {**common, "request_id": "operation-point-0001", "side": "BUY", "shares": 200},
+                {**common, "request_id": "operation-point-0001", "trade_time": "09:30", "side": "BUY", "shares": 200},
             )
             add = append_trade_record(
                 root,
-                {**common, "request_id": "operation-point-0002", "side": "BUY", "shares": 100},
+                {**common, "request_id": "operation-point-0002", "trade_time": "10:00", "side": "BUY", "shares": 100},
             )
             reduce = append_trade_record(
                 root,
-                {**common, "request_id": "operation-point-0003", "side": "SELL", "shares": 50},
+                {**common, "request_id": "operation-point-0003", "trade_time": "13:00", "side": "SELL", "shares": 50},
             )
             close = append_trade_record(
                 root,
-                {**common, "request_id": "operation-point-0004", "side": "SELL", "shares": 250},
+                {**common, "request_id": "operation-point-0004", "trade_time": "14:30", "side": "SELL", "shares": 250},
             )
 
             self.assertEqual("首次买入", first["record"]["operation"])
@@ -264,6 +264,7 @@ class TradeRecordTests(unittest.TestCase):
                 {
                     **common,
                     "request_id": "request-buy-0003",
+                    "trade_time": "09:30",
                     "side": "BUY",
                     "shares": 100,
                 },
@@ -274,6 +275,7 @@ class TradeRecordTests(unittest.TestCase):
                     {
                         **common,
                         "request_id": "request-sell-0002",
+                        "trade_time": "14:00",
                         "side": "SELL",
                         "shares": 200,
                     },
@@ -306,6 +308,10 @@ class TradeLedgerFactTests(unittest.TestCase):
             self.assertEqual("", row["trade_time"])
             self.assertFalse(created["record"]["trade_time_known"])
             self.assertEqual("未记录", created["record"]["trade_time_label"])
+            summary = list_trade_records(root)["symbol_summaries"][0]
+            self.assertEqual("ORDER_KNOWN", summary["order_status"])
+            self.assertEqual("顺序明确", summary["order_status_label"])
+            self.assertEqual("unknown-time-0001", summary["basis_record_ref"])
             # 落盘内容里不允许出现提交时刻；台账里唯一带冒号的字段就是成交时间。
             self.assertNotIn(datetime.now().strftime("%H:%M"), stored)
             self.assertNotIn(":", row["trade_time"])
@@ -366,7 +372,8 @@ class TradeLedgerFactTests(unittest.TestCase):
 
             # 已经发生的成交照样保存。
             self.assertFalse(later["deduplicated"])
-            self.assertEqual(2, list_trade_records(root)["count"])
+            listed = list_trade_records(root)
+            self.assertEqual(2, listed["count"])
             self.assertEqual(100, later["record"]["shares"])
             self.assertEqual(46.0, later["record"]["price"])
             # 但先后顺序无从确认，所以不给出看似精确的数字。
@@ -375,8 +382,12 @@ class TradeLedgerFactTests(unittest.TestCase):
             self.assertIsNone(later["record"]["avg_cost_after_trade"])
             self.assertEqual(
                 ["", "14:30:00"],
-                [record["trade_time"] for record in list_trade_records(root)["records"]],
+                [record["trade_time"] for record in listed["records"]],
             )
+            summary = listed["symbol_summaries"][0]
+            self.assertEqual("ORDER_AMBIGUOUS", summary["order_status"])
+            self.assertIsNone(summary["basis_record_ref"])
+            self.assertIsNone(summary["last_operation_label"])
 
     def test_each_trade_reports_remaining_average_cost_and_realized_pnl(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -559,6 +570,9 @@ class TradeLedgerFactTests(unittest.TestCase):
             self.assertEqual(today, summary["last_trade_date"])
             self.assertEqual("14:00", summary["last_trade_time_label"])
             self.assertEqual("减仓", summary["last_operation_label"])
+            self.assertEqual("ORDER_KNOWN", summary["order_status"])
+            self.assertEqual("顺序明确", summary["order_status_label"])
+            self.assertEqual("summary-0003", summary["basis_record_ref"])
             self.assertTrue(summary["complete"])
             self.assertEqual("", summary["incomplete_label"])
 
@@ -764,6 +778,10 @@ class TradeLedgerIntegrityTests(unittest.TestCase):
             self.assertIsNone(record["remaining_shares"])
             self.assertIsNone(record["avg_cost_after_trade"])
             self.assertEqual("未归类", record["operation_label"])
+            summary = list_trade_records(root)["symbol_summaries"][0]
+            self.assertEqual("ORDER_KNOWN", summary["order_status"])
+            self.assertEqual("after-gap-buy-0001", summary["basis_record_ref"])
+            self.assertEqual("未归类", summary["last_operation_label"])
             self.assertEqual("", record["operation_class"])
             self.assertFalse(record["complete"])
             self.assertEqual("历史数据不完整", record["incomplete_label"])
@@ -1080,8 +1098,7 @@ class TradeLedgerIntegrityTests(unittest.TestCase):
             self.assertEqual(2, listed["incomplete_record_count"])
 
     def test_a_timed_trade_is_not_rejected_by_an_unknown_time_on_the_same_day(self):
-        # 未知时间在内部按「当日最后一刻」排序，但那只是排序约定，
-        # 不能拿它去否决一笔已经发生的成交（否则又是按伪造值做判断）。
+        # 未知时间没有业务时刻，不能拿展示位置去否决已发生成交。
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             append_trade_record(
@@ -1112,11 +1129,16 @@ class TradeLedgerIntegrityTests(unittest.TestCase):
             record = created["record"]
 
             self.assertFalse(created["deduplicated"])
-            self.assertEqual(2, list_trade_records(root)["count"])
+            listed = list_trade_records(root)
+            self.assertEqual(2, listed["count"])
             # 同一天内先后顺序无从确认，所以不给出看似精确的剩余股数与成本。
             self.assertIsNone(record["remaining_shares"])
             self.assertIsNone(record["avg_cost_after_trade"])
             self.assertEqual("未归类", record["operation_label"])
+            summary = listed["symbol_summaries"][0]
+            self.assertEqual("ORDER_AMBIGUOUS", summary["order_status"])
+            self.assertIsNone(summary["basis_record_ref"])
+            self.assertIsNone(summary["last_operation_label"])
 
     def test_a_definitely_earlier_trade_is_still_rejected(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1221,14 +1243,16 @@ class TradeLedgerIntegrityTests(unittest.TestCase):
 
                 self.assertFalse(summary["complete"])
                 self.assertFalse(summary["exact"])
-                self.assertEqual("历史数据不完整", summary["incomplete_label"])
+                self.assertEqual("", summary["incomplete_label"])
+                self.assertEqual([], summary["incomplete_reasons"])
+                self.assertEqual("ORDER_AMBIGUOUS", summary["order_status"])
                 self.assertIn(
                     "同一天有成交没有记录成交时间，先后顺序无法确认",
-                    summary["incomplete_reasons"],
+                    summary["order_reasons"],
                 )
                 self.assertIsNone(summary["remaining_shares"])
                 self.assertIsNone(summary["avg_cost"])
-                self.assertEqual("未归类", summary["last_operation_label"])
+                self.assertIsNone(summary["last_operation_label"])
         # 行序不同也必须给出同一个答案。
         self.assertEqual(
             seen[0]["remaining_shares"], seen[1]["remaining_shares"]
@@ -1404,6 +1428,8 @@ class TradeLedgerIntegrityTests(unittest.TestCase):
             self.assertEqual("", summary["fee_label"])
             self.assertEqual([], summary["fee_reasons"])
             self.assertEqual([], summary["incomplete_reasons"])
+            self.assertEqual("ORDER_KNOWN", summary["order_status"])
+            self.assertEqual("exact-0003", summary["basis_record_ref"])
             self.assertEqual(0, listed["incomplete_record_count"])
             self.assertEqual(0, listed["fee_unknown_record_count"])
             self.assertTrue(all(record["exact"] for record in listed["records"]))
@@ -1621,6 +1647,215 @@ class TradeLedgerIntegrityTests(unittest.TestCase):
             self.assertEqual("未归类", record["operation_label"])
             self.assertEqual("", record["operation_class"])
             self.assertIsNone(record["remaining_shares"])
+
+
+class TradeOrderAndReferenceTests(unittest.TestCase):
+    """功能 1.2：业务顺序与稳定展示身份必须彼此独立。"""
+
+    TODAY = date.today().isoformat()
+
+    def _append(
+        self,
+        root: Path,
+        request_id: str,
+        *,
+        trade_time: str = "",
+        side: str = "BUY",
+        price: float = 45,
+        shares: int = 100,
+    ) -> dict:
+        return append_trade_record(
+            root,
+            {
+                "request_id": request_id,
+                "trade_date": self.TODAY,
+                "trade_time": trade_time,
+                "symbol": "600760",
+                "side": side,
+                "price": price,
+                "shares": shares,
+                "fee": 0,
+            },
+        )
+
+    def test_same_day_all_unknown_manual_trades_are_order_ambiguous(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self._append(root, "all-unknown-0001")
+            second = self._append(root, "all-unknown-0002", price=46)
+            listed = list_trade_records(root)
+            summary = listed["symbol_summaries"][0]
+
+            self.assertFalse(second["deduplicated"])
+            self.assertEqual(2, listed["count"])
+            self.assertEqual("ORDER_AMBIGUOUS", summary["order_status"])
+            self.assertEqual("顺序待核对", summary["order_status_label"])
+            self.assertIsNone(summary["basis_record_ref"])
+            self.assertIsNone(summary["remaining_shares"])
+            self.assertIsNone(summary["avg_cost"])
+            self.assertIsNone(summary["last_trade_date"])
+            self.assertIsNone(summary["last_trade_time"])
+            self.assertIsNone(summary["last_operation_label"])
+            self.assertIn(
+                "同一天有成交没有记录成交时间，先后顺序无法确认",
+                summary["order_reasons"],
+            )
+            self.assertTrue(all(r["trade_time_label"] == "未记录" for r in listed["records"]))
+
+    def test_identical_trade_facts_have_distinct_refs_and_request_retry_is_still_idempotent(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            first = self._append(root, "same-fact-0001", trade_time="09:30")
+            second = self._append(root, "same-fact-0002", trade_time="09:30")
+            retried = self._append(root, "same-fact-0002", trade_time="09:30")
+            listed = list_trade_records(root)
+
+            self.assertEqual("same-fact-0001", first["record"]["record_ref"])
+            self.assertEqual("same-fact-0002", second["record"]["record_ref"])
+            self.assertNotEqual(first["record"]["record_ref"], second["record"]["record_ref"])
+            self.assertTrue(retried["deduplicated"])
+            self.assertEqual(second["record"]["record_ref"], retried["record"]["record_ref"])
+            self.assertEqual(2, listed["count"])
+            self.assertEqual(
+                "ORDER_AMBIGUOUS",
+                listed["symbol_summaries"][0]["order_status"],
+            )
+
+    def test_existing_refs_survive_a_later_append(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self._append(root, "stable-ref-0001", trade_time="09:30")
+            self._append(root, "stable-ref-0002", trade_time="10:00")
+            before = {
+                record["request_id"]: record["record_ref"]
+                for record in list_trade_records(root)["records"]
+            }
+
+            append_trade_record(
+                root,
+                {
+                    "request_id": "stable-ref-0003",
+                    "trade_date": "2026-01-01",
+                    "trade_time": "14:00",
+                    "symbol": "000001.SZ",
+                    "side": "BUY",
+                    "price": 10,
+                    "shares": 100,
+                    "fee": 0,
+                },
+            )
+            after = {
+                record["request_id"]: record["record_ref"]
+                for record in list_trade_records(root)["records"]
+                if record["request_id"] in before
+            }
+            self.assertEqual(before, after)
+
+    def test_a_source_ref_collision_keeps_manual_request_idempotency_and_unique_refs(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            write_trade_history(
+                root,
+                [
+                    {
+                        "trade_date": "2026-01-01",
+                        "trade_time": "09:30:00",
+                        "symbol": "600760.SH",
+                        "side": "BUY",
+                        "price": "45",
+                        "shares": "100",
+                        "remaining_shares": "100",
+                        "avg_cost_after_trade": "45",
+                        "realized_pnl": "0",
+                        "fee": "0",
+                        "stamp_tax": "0",
+                        "transfer_fee": "0",
+                        "other_fee": "0",
+                        "record_ref": "ref-collision-0001",
+                        "source": "panel_import",
+                    }
+                ],
+            )
+            created = self._append(
+                root,
+                "ref-collision-0001",
+                trade_time="10:00",
+            )
+            retried = self._append(
+                root,
+                "ref-collision-0001",
+                trade_time="10:00",
+            )
+            listed = list_trade_records(root)
+
+            self.assertEqual("ref-collision-0001", created["record"]["request_id"])
+            self.assertEqual("manual-ref-collision-0001", created["record"]["record_ref"])
+            self.assertTrue(retried["deduplicated"])
+            self.assertEqual(created["record"]["record_ref"], retried["record"]["record_ref"])
+            self.assertEqual(2, len({record["record_ref"] for record in listed["records"]}))
+            self.assertEqual(2, listed["count"])
+
+    def test_legacy_duplicate_rows_get_stable_distinct_refs_and_persist_on_append(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            target = root / "records" / "my_trades.csv"
+            target.parent.mkdir(parents=True)
+            legacy_columns = [column for column in TRADE_COLUMNS if column != "record_ref"]
+            identical = {
+                "trade_date": "2026-08-01",
+                "trade_time": "09:30:00",
+                "symbol": "600760.SH",
+                "stock_name": "测试股票",
+                "side": "BUY",
+                "price": "45",
+                "shares": "100",
+                "remaining_shares": "100",
+                "avg_cost_after_trade": "45",
+                "realized_pnl": "0",
+                "source": "panel_import",
+            }
+            with target.open("w", encoding="utf-8-sig", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=legacy_columns)
+                writer.writeheader()
+                writer.writerow({column: identical.get(column, "") for column in legacy_columns})
+                writer.writerow({column: identical.get(column, "") for column in legacy_columns})
+            original_bytes = target.read_bytes()
+
+            first_read = [record["record_ref"] for record in list_trade_records(root)["records"]]
+            second_read = [record["record_ref"] for record in list_trade_records(root)["records"]]
+            self.assertEqual(first_read, second_read)
+            self.assertEqual(2, len(set(first_read)))
+            self.assertNotIn("record_ref", next(csv.DictReader(target.read_text(encoding="utf-8-sig").splitlines())))
+
+            append_trade_record(
+                root,
+                {
+                    "request_id": "legacy-save-0001",
+                    "trade_date": "2026-08-02",
+                    "trade_time": "10:00",
+                    "symbol": "600760",
+                    "side": "BUY",
+                    "price": 46,
+                    "shares": 100,
+                    "fee": 0,
+                },
+            )
+            persisted = list(
+                csv.DictReader(target.read_text(encoding="utf-8-sig").splitlines())
+            )
+            legacy_rows = [row for row in persisted if row["source"] == "panel_import"]
+            self.assertEqual(set(first_read), {row["record_ref"] for row in legacy_rows})
+            expected_facts = {
+                column: identical.get(column, "") for column in legacy_columns
+            }
+            for row in legacy_rows:
+                self.assertEqual(
+                    expected_facts,
+                    {column: row[column] for column in legacy_columns},
+                )
+            backups = list((root / "history" / "trade_records").glob("trades_*.csv"))
+            self.assertEqual(1, len(backups))
+            self.assertEqual(original_bytes, backups[0].read_bytes())
 
 
 if __name__ == "__main__":

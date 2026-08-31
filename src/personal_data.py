@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import csv
 from datetime import date, datetime
+from hashlib import sha256
 from io import StringIO
 import json
 import math
@@ -11,6 +12,7 @@ import re
 import shutil
 import threading
 from typing import Any
+from uuid import uuid4
 
 import pandas as pd
 
@@ -74,9 +76,31 @@ TRADE_COLUMNS = [
     "discipline_checks_json",
     "emotion_flags_json",
     "emotion_clear",
+    "record_ref",
     "source",
     "notes",
 ]
+
+# 旧台账的兼容引用只取这组固定成交事实。未来增加展示或审查字段时，
+# 不会因 TRADE_COLUMNS 扩展而让尚未持久化的旧引用变化。
+LEGACY_RECORD_REF_FACT_COLUMNS = (
+    "trade_date",
+    "trade_time",
+    "symbol",
+    "side",
+    "price",
+    "shares",
+    "gross_amount",
+    "fee",
+    "stamp_tax",
+    "transfer_fee",
+    "other_fee",
+    "net_amount",
+    "avg_cost_after_trade",
+    "realized_pnl",
+    "remaining_shares",
+    "source",
+)
 
 _TRADE_WRITE_LOCK = threading.RLock()
 
@@ -137,11 +161,13 @@ INCOMPLETE_HISTORY_LABEL = "历史数据不完整"
 UNCLASSIFIED_OPERATION_LABEL = "未归类"
 FEE_UNKNOWN_LABEL = "费用未知"
 FEE_EXCLUDED_LABEL = "不含未知费用"
+ORDER_KNOWN = "ORDER_KNOWN"
+ORDER_AMBIGUOUS = "ORDER_AMBIGUOUS"
+ORDER_STATUS_LABELS = {
+    ORDER_KNOWN: "顺序明确",
+    ORDER_AMBIGUOUS: "顺序待核对",
+}
 ORDER_AMBIGUOUS_REASON = "同一天有成交没有记录成交时间，先后顺序无法确认"
-
-# 成交时间未知时不伪造具体时刻。排序和追加校验统一把它当成当日最后一刻：
-# 它确实是当天最后被补进台账的一笔，这样同日已知时间的成交也不会被它挡住。
-_UNKNOWN_TIME_ORDER = "23:59:59.999999"
 
 ALIASES = {
     "snapshot_date": ["snapshot_date", "快照日期", "日期", "数据日期"],
@@ -195,6 +221,14 @@ ALIASES = {
     "position_market_value": ["position_market_value", "成交后市值", "持仓市值"],
     "rule_status": ["rule_status", "规则状态"],
     "emotion": ["emotion", "情绪记录", "情绪"],
+    "record_ref": [
+        "record_ref",
+        "成交编号",
+        "成交序号",
+        "交易流水号",
+        "trade_id",
+        "trade_no",
+    ],
     "source": ["source", "数据来源", "来源"],
     "notes": ["notes", "备注", "说明"],
 }
@@ -457,19 +491,86 @@ def _trade_rows(path: Path) -> list[dict[str, str]]:
         raise PersonalDataError(f"操作记录无法读取：{exc}") from exc
 
 
-def _trade_moment(trade_date: Any, trade_time: Any) -> datetime | None:
-    date_text = str(trade_date or "").strip()
-    time_text = str(trade_time or "").strip()
-    if not date_text:
-        return None
+def _trade_date_value(value: Any) -> date | None:
+    """只读真实成交日期。无法识别时返回 None，不用其他日期补位。"""
     try:
-        return datetime.fromisoformat(f"{date_text} {time_text or _UNKNOWN_TIME_ORDER}")
+        return date.fromisoformat(str(value or "").strip())
     except ValueError:
         return None
 
 
-def _trade_timestamp(row: dict[str, str]) -> datetime | None:
-    return _trade_moment(row.get("trade_date", ""), row.get("trade_time", ""))
+def _actual_trade_timestamp(row: dict[str, str]) -> datetime | None:
+    """只有日期和实际成交时间都存在时才返回时刻。"""
+    trade_date = _trade_date_value(row.get("trade_date"))
+    trade_time = _normalize_trade_time(row.get("trade_time"))
+    if trade_date is None or not trade_time:
+        return None
+    return datetime.fromisoformat(f"{trade_date.isoformat()} {trade_time}")
+
+
+def _trade_business_sort_key(row: dict[str, str]) -> tuple[date, str]:
+    """仅在顺序已被证明时使用的业务排序键。"""
+    return (
+        _trade_date_value(row.get("trade_date")) or date.min,
+        _normalize_trade_time(row.get("trade_time")),
+    )
+
+
+def _trade_display_sort_key(row: dict[str, str]) -> tuple[date, int, str, str]:
+    """只用于让列表稳定展示，不证明同日成交的业务先后。"""
+    trade_time = _normalize_trade_time(row.get("trade_time"))
+    return (
+        _trade_date_value(row.get("trade_date")) or date.min,
+        0 if trade_time else 1,
+        trade_time,
+        str(row.get("record_ref") or "").strip(),
+    )
+
+
+def _legacy_record_payload(row: dict[str, str]) -> str:
+    return "\x1f".join(
+        str(row.get(column) or "").strip()
+        for column in LEGACY_RECORD_REF_FACT_COLUMNS
+    )
+
+
+def _legacy_record_ref(payload: str, occurrence: int) -> str:
+    digest = sha256(f"{payload}\x1e{occurrence}".encode("utf-8")).hexdigest()[:24]
+    return f"legacy-{digest}"
+
+
+def _assign_trade_record_refs(rows: list[dict[str, str]]) -> bool:
+    """为旧台账补稳定身份，不修改任何成交事实。
+
+    手工记录恢复 request_id；其他旧行使用「行事实 + 同内容出现次序」
+    生成兼容引用。出现次序使两笔内容完全相同的真实成交仍有不同引用。
+    此函数只改内存中的 record_ref；读取不会写盘，下一次明确追加时才
+    由现有带备份的整表写入流程持久化。
+    """
+    changed = False
+    used: set[str] = set()
+    occurrences: dict[str, int] = {}
+    for row in rows:
+        existing = str(row.get("record_ref") or "").strip()
+        source = str(row.get("source") or "").strip()
+        candidate = existing
+        if not candidate and source.startswith("panel_manual:"):
+            candidate = source.removeprefix("panel_manual:").strip()
+
+        if not candidate or candidate in used:
+            payload = _legacy_record_payload(row)
+            occurrence = occurrences.get(payload, 0) + 1
+            candidate = _legacy_record_ref(payload, occurrence)
+            while candidate in used:
+                occurrence += 1
+                candidate = _legacy_record_ref(payload, occurrence)
+            occurrences[payload] = occurrence
+
+        if existing != candidate:
+            row["record_ref"] = candidate
+            changed = True
+        used.add(candidate)
+    return changed
 
 
 def _normalize_trade_time(value: Any) -> str:
@@ -548,7 +649,7 @@ def _trade_ledger_facts(
         ]
         fee_total = None if any(d is None for d in details) else round(sum(details), 4)
     present = {
-        "trade_date": _trade_moment(row.get("trade_date"), "") is not None,
+        "trade_date": _trade_date_value(row.get("trade_date")) is not None,
         "symbol": bool(str(row.get("symbol") or "").strip()),
         "side": side in {"BUY", "SELL"},
         "price": price is not None and price > 0,
@@ -611,7 +712,25 @@ def _trade_fee_chain(rows: list[dict[str, str]]) -> dict[int, bool]:
 
     carried_by_index: dict[int, bool] = {}
     for indexes in by_symbol.values():
-        indexes.sort(key=lambda index: _trade_timestamp(rows[index]) or datetime.min)
+        matching = [rows[index] for index in indexes]
+        if _order_is_ambiguous(matching):
+            # 顺序不可证时不让展示行序决定费用如何向后传递。
+            # 只要这组手工成交里有一笔费用未知，就不声称其他手工行的
+            # 成本链已包全部费用。券商直接给出的本行事实仍沿用功能 1.1 口径。
+            manual_fee_chain_complete = all(
+                _stored_number(row.get("fee")) is not None
+                for row in matching
+                if str(row.get("source") or "").startswith("panel_manual:")
+            )
+            for index in indexes:
+                row = rows[index]
+                if str(row.get("source") or "").startswith("panel_manual:"):
+                    carried_by_index[index] = manual_fee_chain_complete
+                else:
+                    carried_by_index[index] = True
+            continue
+
+        indexes.sort(key=lambda index: _trade_business_sort_key(rows[index]))
         carried = True
         for index in indexes:
             row = rows[index]
@@ -632,31 +751,65 @@ def _trade_fee_chain(rows: list[dict[str, str]]) -> dict[int, bool]:
 
 
 def _order_is_ambiguous(rows: list[dict[str, str]]) -> bool:
-    """判断同一天内的先后顺序是否无从确认。
+    """判断业务先后是否有事实依据。
 
-    _UNKNOWN_TIME_ORDER 只是内部排序约定，不是事实。什么时候算有据：
-    - 同一天里有的记了时间、有的没记 → 没记的那笔被排到「当日最后」是编出来的，无据；
-    - 同一天里全都没记时间，但全部是面板自己按顺序追加的行 → 追加次序本身就是记录，
-      稳定排序会保留它，有据；
-    - 同一天里全都没记时间且含导入行 → 券商导出常按倒序，行序不构成证据，无据。
-      （实测：同日一买一卖的倒序导出会让「最后一笔」翻转。）
+    创建顺序、提交时间、CSV 行序和稳定展示顺序都不是成交顺序事实。
+    同股同日多笔中只要任一笔时间未知，本轮就不选择「最后成交」。
     """
+    return _trade_order_status(rows) == ORDER_AMBIGUOUS
+
+
+def _trade_order_status(rows: list[dict[str, str]]) -> str:
     by_date: dict[str, list[dict[str, str]]] = {}
     for row in rows:
-        trade_date = str(row.get("trade_date") or "").strip()
-        if trade_date:
-            by_date.setdefault(trade_date, []).append(row)
+        trade_date = _trade_date_value(row.get("trade_date"))
+        if trade_date is None:
+            return ORDER_AMBIGUOUS
+        by_date.setdefault(trade_date.isoformat(), []).append(row)
     for group in by_date.values():
-        if len(group) < 2:
-            continue
-        timed = [bool(_normalize_trade_time(row.get("trade_time"))) for row in group]
-        if any(timed) and not all(timed):
-            return True
-        if not any(timed) and not all(
-            str(row.get("source") or "").startswith("panel_manual:") for row in group
+        if len(group) > 1 and any(
+            not _normalize_trade_time(row.get("trade_time")) for row in group
         ):
-            return True
-    return False
+            return ORDER_AMBIGUOUS
+        known_times = [
+            _normalize_trade_time(row.get("trade_time"))
+            for row in group
+            if _normalize_trade_time(row.get("trade_time"))
+        ]
+        if len(known_times) != len(set(known_times)):
+            return ORDER_AMBIGUOUS
+    return ORDER_KNOWN
+
+
+def _trade_order_reasons(rows: list[dict[str, str]]) -> list[str]:
+    reasons: list[str] = []
+    if any(_trade_date_value(row.get("trade_date")) is None for row in rows):
+        reasons.append("有成交缺少可识别的成交日期，先后顺序无法确认")
+    if _trade_order_status(rows) == ORDER_AMBIGUOUS:
+        by_date: dict[str, list[dict[str, str]]] = {}
+        for row in rows:
+            trade_date = _trade_date_value(row.get("trade_date"))
+            if trade_date is not None:
+                by_date.setdefault(trade_date.isoformat(), []).append(row)
+        if any(
+            len(group) > 1
+            and any(not _normalize_trade_time(row.get("trade_time")) for row in group)
+            for group in by_date.values()
+        ):
+            reasons.append(ORDER_AMBIGUOUS_REASON)
+        if any(
+            len(times) != len(set(times))
+            for times in (
+                [
+                    _normalize_trade_time(row.get("trade_time"))
+                    for row in group
+                    if _normalize_trade_time(row.get("trade_time"))
+                ]
+                for group in by_date.values()
+            )
+        ):
+            reasons.append("同一天有多笔成交记录了相同时间，先后顺序无法确认")
+    return list(dict.fromkeys(reasons))
 
 
 def _recorded_position_state(
@@ -668,12 +821,7 @@ def _recorded_position_state(
 
     绝不按买卖方向重建持仓，绝不把未知成本当成 0，也绝不沿用上一行的数字顶替这一行。
     """
-    indexes = [
-        index
-        for index, row in enumerate(rows)
-        if row.get("symbol") == symbol
-    ]
-    indexes.sort(key=lambda index: _trade_timestamp(rows[index]) or datetime.min)
+    indexes = [index for index, row in enumerate(rows) if row.get("symbol") == symbol]
     if not indexes:
         # 台账里这只股票一笔都没有：前序确实是 0 股 0 成本，这是记录本身的事实，不是假定。
         return {
@@ -683,49 +831,65 @@ def _recorded_position_state(
             "cost": 0.0,
             "fee_complete": True,
             "latest_timestamp": None,
+            "latest_trade_date": None,
             "latest_time_known": True,
+            "order_status": ORDER_KNOWN,
             "reasons": [],
         }
 
-    latest_index = indexes[-1]
-    latest = rows[latest_index]
     matching = [rows[index] for index in indexes]
-    facts = [_trade_ledger_facts(row) for row in matching]
-    latest_facts = facts[-1]
-    shares = latest_facts["remaining_shares"]
-    cost = latest_facts["avg_cost_after_trade"]
+    order_status = _trade_order_status(matching)
+    ordered_indexes = sorted(
+        indexes, key=lambda index: _trade_business_sort_key(rows[index])
+    )
+    facts = [_trade_ledger_facts(rows[index]) for index in ordered_indexes]
+    all_dates = [_trade_date_value(row.get("trade_date")) for row in matching]
+    dates_valid = all(value is not None for value in all_dates)
+    latest_trade_date = max(all_dates) if dates_valid else None
+
+    latest_index = ordered_indexes[-1] if order_status == ORDER_KNOWN else None
+    latest = rows[latest_index] if latest_index is not None else None
+    latest_facts = facts[-1] if latest_index is not None else None
+    shares = latest_facts["remaining_shares"] if latest_facts is not None else None
+    cost = latest_facts["avg_cost_after_trade"] if latest_facts is not None else None
 
     reasons: list[str] = []
     broken = sum(1 for item in facts if not item["complete"])
     if broken:
         reasons.append(f"{broken} 笔成交缺少必要字段")
-    undated = any(_trade_timestamp(row) is None for row in matching)
-    if undated:
-        reasons.append("有成交缺少可识别的成交日期，先后顺序无法确认")
-    ambiguous = _order_is_ambiguous(matching)
-    if ambiguous:
-        reasons.append(ORDER_AMBIGUOUS_REASON)
+    reasons.extend(_trade_order_reasons(matching))
     # 链条上任意一笔缺剩余股数或平均成本，就说不清持仓怎么变到今天的——
     # 只看「排最后那一行」会让中间被判为不可信而留空的成交被整笔跳过。
     incomplete_chain = any(
         item["remaining_shares"] is None or item["avg_cost_after_trade"] is None
         for item in facts
     )
-    if shares is None:
-        reasons.append("最后一笔没有记录成交后剩余股数")
-    if cost is None:
-        reasons.append("最后一笔没有记录成交后平均成本")
+    if order_status == ORDER_KNOWN:
+        if shares is None:
+            reasons.append("最后一笔没有记录成交后剩余股数")
+        if cost is None:
+            reasons.append("最后一笔没有记录成交后平均成本")
 
     chain = fee_chain if fee_chain is not None else _trade_fee_chain(rows)
     return {
         "has_history": True,
-        "known": not (incomplete_chain or undated or ambiguous),
+        "known": not incomplete_chain and order_status == ORDER_KNOWN,
         "shares": shares,
         "cost": cost,
-        "fee_complete": chain.get(latest_index, True),
-        "latest_timestamp": _trade_timestamp(latest),
-        "latest_time_known": bool(_normalize_trade_time(latest.get("trade_time"))),
-        "reasons": reasons,
+        "fee_complete": (
+            chain.get(latest_index, True)
+            if latest_index is not None
+            else all(chain.get(index, True) for index in indexes)
+        ),
+        "latest_timestamp": (
+            _actual_trade_timestamp(latest) if latest is not None else None
+        ),
+        "latest_trade_date": latest_trade_date,
+        "latest_time_known": bool(
+            latest is not None and _normalize_trade_time(latest.get("trade_time"))
+        ),
+        "order_status": order_status,
+        "reasons": list(dict.fromkeys(reasons)),
     }
 
 
@@ -751,6 +915,7 @@ def _trade_display_row(
     facts = _trade_ledger_facts(row, fee_complete=fee_complete)
     return {
         "request_id": request_id,
+        "record_ref": str(row.get("record_ref") or "").strip(),
         "trade_date": row.get("trade_date"),
         "trade_time": row.get("trade_time"),
         "trade_time_known": bool(_normalize_trade_time(row.get("trade_time"))),
@@ -894,7 +1059,7 @@ def _trade_symbol_summaries(
     rows: list[dict[str, str]],
     fee_chain: dict[int, bool] | None = None,
 ) -> list[dict[str, Any]]:
-    """按股票复述最后一笔成交留下的剩余股数与平均成本，不重算、不补齐。"""
+    """按股票复述可确认的台账汇总，不重算、不补齐、不用展示行序作证。"""
     chain = fee_chain if fee_chain is not None else _trade_fee_chain(rows)
     grouped: dict[str, list[int]] = {}
     for index, row in enumerate(rows):
@@ -905,70 +1070,119 @@ def _trade_symbol_summaries(
 
     summaries: list[dict[str, Any]] = []
     for symbol, indexes in grouped.items():
-        indexes.sort(key=lambda index: _trade_timestamp(rows[index]) or datetime.min)
         matching = [rows[index] for index in indexes]
+        order_status = _trade_order_status(matching)
+        if order_status == ORDER_KNOWN:
+            ordered_indexes = sorted(
+                indexes, key=lambda index: _trade_business_sort_key(rows[index])
+            )
+        else:
+            ordered_indexes = sorted(
+                indexes, key=lambda index: _trade_display_sort_key(rows[index])
+            )
         facts = [
             _trade_ledger_facts(rows[index], fee_complete=chain.get(index, True))
-            for index in indexes
+            for index in ordered_indexes
         ]
-        latest = matching[-1]
-        latest_facts = facts[-1]
-        reasons: list[str] = []
-        if any(_trade_timestamp(row) is None for row in matching):
-            reasons.append("有成交缺少可识别的成交日期，先后顺序无法确认")
+        latest_index = ordered_indexes[-1] if order_status == ORDER_KNOWN else None
+        latest = rows[latest_index] if latest_index is not None else None
+        latest_facts = facts[-1] if latest is not None else None
+        representative = rows[
+            sorted(indexes, key=lambda index: _trade_display_sort_key(rows[index]))[-1]
+        ]
+
+        field_reasons: list[str] = []
         broken = sum(1 for item in facts if not item["complete"])
         if broken:
-            reasons.append(f"{broken} 笔成交缺少必要字段")
-        # 顺序无从确认时，「最后一笔」本身就是排序约定的产物，不能拿它的数字当事实。
-        ambiguous = _order_is_ambiguous(matching)
-        if ambiguous:
-            reasons.append(ORDER_AMBIGUOUS_REASON)
-        remaining = None if ambiguous else latest_facts["remaining_shares"]
-        average_cost = None if ambiguous else latest_facts["avg_cost_after_trade"]
-        if not ambiguous:
+            field_reasons.append(f"{broken} 笔成交缺少必要字段")
+
+        order_reasons = _trade_order_reasons(matching)
+        remaining = (
+            latest_facts["remaining_shares"] if latest_facts is not None else None
+        )
+        average_cost = (
+            latest_facts["avg_cost_after_trade"] if latest_facts is not None else None
+        )
+        if order_status == ORDER_KNOWN:
             if remaining is None:
-                reasons.append("最后一笔没有记录成交后剩余股数")
+                field_reasons.append("最后一笔没有记录成交后剩余股数")
             if average_cost is None:
-                reasons.append("最后一笔没有记录成交后平均成本")
-        fee_complete = latest_facts["fee_complete"]
+                field_reasons.append("最后一笔没有记录成交后平均成本")
+        else:
+            remaining = None
+            average_cost = None
+
+        fee_complete = (
+            latest_facts["fee_complete"]
+            if latest_facts is not None
+            else all(item["fee_complete"] for item in facts)
+        )
         fee_reasons: list[str] = []
         # 没有数值可限定时不提费用：数字位已经是「—」，再说「不含未知费用」只会添乱。
         has_value = remaining is not None or average_cost is not None
         if not fee_complete and has_value:
             fee_reasons.append("成交账本平均成本与已实现盈亏不含未知费用")
+        summary_complete = not field_reasons and order_status == ORDER_KNOWN
+        valid_dates = [
+            value
+            for value in (
+                _trade_date_value(row.get("trade_date")) for row in matching
+            )
+            if value is not None
+        ]
         summaries.append(
             {
                 "symbol": symbol,
-                "stock_name": str(latest.get("stock_name") or "").strip() or symbol,
+                "stock_name": str(representative.get("stock_name") or "").strip() or symbol,
                 "trade_count": len(indexes),
                 "remaining_shares": remaining,
                 "avg_cost": average_cost,
-                "last_trade_date": str(latest.get("trade_date") or "").strip() or None,
-                "last_trade_time": str(latest.get("trade_time") or "").strip() or None,
-                "last_trade_time_label": _trade_time_label(latest.get("trade_time")),
-                "last_operation_label": (
-                    UNCLASSIFIED_OPERATION_LABEL
-                    if ambiguous
-                    else latest_facts["operation_label"]
+                "last_trade_date": (
+                    str(latest.get("trade_date") or "").strip() or None
+                    if latest is not None
+                    else None
                 ),
-                "complete": not reasons,
-                "incomplete_reasons": reasons,
-                "incomplete_label": INCOMPLETE_HISTORY_LABEL if reasons else "",
+                "last_trade_time": (
+                    str(latest.get("trade_time") or "").strip() or None
+                    if latest is not None
+                    else None
+                ),
+                "last_trade_time_label": (
+                    _trade_time_label(latest.get("trade_time"))
+                    if latest is not None
+                    else None
+                ),
+                "last_operation_label": (
+                    latest_facts["operation_label"]
+                    if latest_facts is not None
+                    else None
+                ),
+                "order_status": order_status,
+                "order_status_label": ORDER_STATUS_LABELS[order_status],
+                "order_reasons": order_reasons,
+                "basis_record_ref": (
+                    str(latest.get("record_ref") or "").strip()
+                    if latest is not None
+                    else None
+                ),
+                "complete": summary_complete,
+                "incomplete_reasons": list(dict.fromkeys(field_reasons)),
+                "incomplete_label": (
+                    INCOMPLETE_HISTORY_LABEL if field_reasons else ""
+                ),
                 "fee_complete": fee_complete,
                 "fee_reasons": fee_reasons,
                 "fee_label": FEE_UNKNOWN_LABEL if fee_reasons else "",
                 # 「精确完整」要求既不缺字段、也不含未知费用。
-                "exact": (not reasons) and fee_complete,
+                "exact": summary_complete and fee_complete,
+                "_sort_date": max(valid_dates) if valid_dates else date.min,
             }
         )
-    # 两次稳定排序：先代码升序，再按最后一笔时间降序，最近动过的股票排在前面。
+    # 只按最新可识别日期排股票卡片；不因此宣称某笔是最后成交。
     summaries.sort(key=lambda item: item["symbol"])
-    summaries.sort(
-        key=lambda item: _trade_moment(
-            item["last_trade_date"], item["last_trade_time"]
-        ) or datetime.min,
-        reverse=True,
-    )
+    summaries.sort(key=lambda item: item["_sort_date"], reverse=True)
+    for item in summaries:
+        item.pop("_sort_date", None)
     return summaries
 
 
@@ -982,9 +1196,10 @@ def list_trade_records(
     normalized_symbol = _normalize_symbol(symbol) if symbol else None
     safe_limit = max(1, min(int(limit), 200))
     rows = _trade_rows(root / TARGET_FILES["trades"])
+    _assign_trade_record_refs(rows)
     if normalized_symbol:
         rows = [row for row in rows if row.get("symbol") == normalized_symbol]
-    rows.sort(key=lambda row: _trade_timestamp(row) or datetime.min, reverse=True)
+    rows.sort(key=_trade_display_sort_key, reverse=True)
     fee_chain = _trade_fee_chain(rows)
     facts = [
         _trade_ledger_facts(row, fee_complete=fee_chain.get(index, True))
@@ -1036,13 +1251,20 @@ def append_trade_record(
         raise PersonalDataError("备注不能超过 500 字。")
     stock_name = str(payload.get("stock_name") or symbol).strip()[:80] or symbol
     source = f"panel_manual:{request_id}"
-    timestamp = _trade_moment(trade_date.isoformat(), trade_time)
+    timestamp = (
+        datetime.fromisoformat(f"{trade_date.isoformat()} {trade_time}")
+        if trade_time
+        else None
+    )
 
     root = Path(project_root)
     target = root / TARGET_FILES["trades"]
     target.parent.mkdir(parents=True, exist_ok=True)
     with _TRADE_WRITE_LOCK:
         rows = _trade_rows(target)
+        # 兼容旧表头：先在内存中补身份。只有本次确实追加时，
+        # 才随后面带备份的整表写入一起持久化。
+        _assign_trade_record_refs(rows)
         duplicate = next((row for row in rows if row.get("source") == source), None)
         if duplicate is not None:
             duplicate_chain = _trade_fee_chain(rows)
@@ -1056,15 +1278,36 @@ def append_trade_record(
                 "count": len(rows),
             }
 
+        # 手工记录优先直接复用 request_id。只有券商原编号恰好同名时，
+        # 才分配一个可持久化的本地后备引用；request_id 的幂等判定仍只看 source。
+        used_record_refs = {
+            str(existing.get("record_ref") or "").strip()
+            for existing in rows
+            if str(existing.get("record_ref") or "").strip()
+        }
+        record_ref = request_id
+        if record_ref in used_record_refs:
+            base_ref = f"manual-{request_id}"
+            record_ref = base_ref
+            suffix = 2
+            while record_ref in used_record_refs:
+                record_ref = f"{base_ref}-{suffix}"
+                suffix += 1
+
         state = _recorded_position_state(rows, symbol)
         latest_timestamp = state["latest_timestamp"]
+        latest_trade_date = state["latest_trade_date"]
         # 顺序校验只在能确定新成交更早时才拦。任一侧时间未知时只比日期——
-        # 不能拿「当日最后一刻」这个内部排序约定去否决一笔已经发生的成交。
-        if latest_timestamp is not None:
-            if state["latest_time_known"] and trade_time:
+        # 不能拿展示顺序去否决一笔已经发生的成交。
+        if latest_trade_date is not None:
+            if (
+                state["order_status"] == ORDER_KNOWN
+                and state["latest_time_known"]
+                and trade_time
+            ):
                 too_early = timestamp < latest_timestamp
             else:
-                too_early = trade_date < latest_timestamp.date()
+                too_early = trade_date < latest_trade_date
             if too_early:
                 raise PersonalDataError("只能追加该股票最新的一次操作，请先核对日期和时间。")
 
@@ -1078,6 +1321,7 @@ def append_trade_record(
         pending_row = {
             "trade_date": trade_date.isoformat(),
             "trade_time": trade_time,
+            "record_ref": record_ref,
             "source": source,
         }
         order_ambiguous = _order_is_ambiguous([*same_date_rows, pending_row])
@@ -1215,12 +1459,13 @@ def append_trade_record(
                         "false" if checklist else ""
                     )
                 ),
+                "record_ref": record_ref,
                 "source": source,
                 "notes": notes,
             }
         )
         rows.append(row)
-        rows.sort(key=lambda item: _trade_timestamp(item) or datetime.min)
+        rows.sort(key=_trade_display_sort_key)
 
         if target.exists() and target.stat().st_size > len(",".join(TRADE_COLUMNS)):
             backup_dir = root / "history" / "trade_records"
@@ -1254,7 +1499,12 @@ def append_trade_record(
     }
 
 
-def _normalize_trades(frame: pd.DataFrame, filename: str) -> tuple[pd.DataFrame, list[str]]:
+def _normalize_trades(
+    frame: pd.DataFrame,
+    filename: str,
+    *,
+    assign_local_refs: bool = False,
+) -> tuple[pd.DataFrame, list[str]]:
     mapping = _column_map(frame)
     required = {
         "symbol": "证券代码/股票代码",
@@ -1325,17 +1575,46 @@ def _normalize_trades(frame: pd.DataFrame, filename: str) -> tuple[pd.DataFrame,
         "emotion_clear",
     ):
         output[column] = ""
+    source_refs = _clean_text(_series(frame, mapping, "record_ref"))
+    provided_refs = source_refs[source_refs != ""]
+    if provided_refs.duplicated().any():
+        raise PersonalDataError("源文件的成交编号不能重复。")
+    output["record_ref"] = source_refs.replace("", pd.NA)
+    missing_refs = output["record_ref"].isna()
+    if assign_local_refs and missing_refs.any():
+        used = set(provided_refs.tolist())
+        generated: list[str] = []
+        for _ in range(int(missing_refs.sum())):
+            candidate = f"import-{uuid4().hex}"
+            while candidate in used:
+                candidate = f"import-{uuid4().hex}"
+            used.add(candidate)
+            generated.append(candidate)
+        output.loc[missing_refs, "record_ref"] = generated
+        warnings.append(
+            f"{len(generated)} 笔成交没有源成交编号，已在导入时分配并持久化本地记录引用。"
+        )
+    elif missing_refs.any():
+        warnings.append(
+            f"{int(missing_refs.sum())} 笔成交没有源成交编号，提交导入时将分配本地记录引用。"
+        )
     output["source"] = _clean_text(_series(frame, mapping, "source"))
     output.loc[output["source"] == "", "source"] = "panel_import"
     existing_notes = _clean_text(_series(frame, mapping, "notes"))
     import_note = f"数据中心导入：{filename}"
     output["notes"] = existing_notes.map(lambda value: f"{value}；{import_note}" if value else import_note)
 
-    # 时间未知的成交按当日最后排序，与追加录入时的判断保持同一口径。
+    # 这仅是输出文件的稳定展示顺序，不构成同日成交先后证据。
     output = (
-        output.assign(_order_time=output["trade_time"].replace("", _UNKNOWN_TIME_ORDER))
-        .sort_values(["trade_date", "_order_time", "symbol"])
-        .drop(columns="_order_time")
+        output.assign(
+            _time_unknown=(output["trade_time"] == "").astype(int),
+            _record_ref_sort=output["record_ref"].fillna("").astype(str),
+        )
+        .sort_values(
+            ["trade_date", "_time_unknown", "trade_time", "symbol", "_record_ref_sort"],
+            kind="stable",
+        )
+        .drop(columns=["_time_unknown", "_record_ref_sort"])
         .reset_index(drop=True)
     )
 
@@ -1400,7 +1679,11 @@ def _normalize_trades(frame: pd.DataFrame, filename: str) -> tuple[pd.DataFrame,
     return output, list(dict.fromkeys(warnings))
 
 
-def normalize_personal_data(payload: dict[str, Any]) -> tuple[pd.DataFrame, dict[str, Any]]:
+def normalize_personal_data(
+    payload: dict[str, Any],
+    *,
+    assign_trade_refs: bool = False,
+) -> tuple[pd.DataFrame, dict[str, Any]]:
     kind = str(payload.get("kind") or "").strip().lower()
     if kind not in SUPPORTED_KINDS:
         raise PersonalDataError("个人数据类型只支持 positions 或 trades。")
@@ -1409,7 +1692,11 @@ def normalize_personal_data(payload: dict[str, Any]) -> tuple[pd.DataFrame, dict
         normalized, normalize_warnings = _normalize_positions(frame, filename)
         date_column = "snapshot_date"
     else:
-        normalized, normalize_warnings = _normalize_trades(frame, filename)
+        normalized, normalize_warnings = _normalize_trades(
+            frame,
+            filename,
+            assign_local_refs=assign_trade_refs,
+        )
         date_column = "trade_date"
     warnings.extend(normalize_warnings)
     summary = {
@@ -1432,7 +1719,10 @@ def import_personal_data(project_root: str | Path, payload: dict[str, Any]) -> d
     mode = str(payload.get("mode") or "preview").strip().lower()
     if mode not in {"preview", "commit"}:
         raise PersonalDataError("导入模式只支持 preview 或 commit。")
-    normalized, summary = normalize_personal_data(payload)
+    normalized, summary = normalize_personal_data(
+        payload,
+        assign_trade_refs=mode == "commit",
+    )
     if mode == "preview":
         return {**summary, "mode": "preview", "written": False, "backup_path": None}
 

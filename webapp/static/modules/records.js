@@ -511,20 +511,31 @@ import { screeningFreshness } from "./screening.js";
     const summaries = state.trades?.symbol_summaries || [];
     byId("recordSummaryCount").textContent = String(summaries.length);
     byId("recordSummaryList").innerHTML = summaries.length
-      ? summaries.map((item) => `<article class="summary-card" role="listitem">
-        <div class="summary-stock">
-          <strong>${escapeHtml(item.stock_name || item.symbol)}</strong>
-          <small>${escapeHtml(item.symbol)} · 共 ${item.trade_count} 笔成交</small>
-        </div>
-        <dl class="summary-facts">
-          ${factItem("成交账本剩余股数", shareCount(item.remaining_shares))}
-          ${factItem("成交账本平均成本", factValue(item.avg_cost, formatCost), feeNote(item.fee_complete ? "" : "不含未知费用"))}
-          ${factItem("最后操作日期", clean(item.last_trade_date) || "—")}
-        </dl>
-        <p class="summary-basis">成交账本剩余股数与平均成本来自最后一笔成交：${escapeHtml(recordMoment(item.last_trade_date, item.last_trade_time_label))} · ${escapeHtml(item.last_operation_label || "成交")}。尚未与持仓快照核对，不等于当前实际持仓。</p>
-        ${incompleteNote(item.incomplete_label, item.incomplete_reasons)}
-        ${incompleteNote(item.fee_label, item.fee_reasons)}
-      </article>`).join("")
+      ? summaries.map((item) => {
+        const orderKnown = item.order_status === "ORDER_KNOWN";
+        const orderAmbiguous = item.order_status === "ORDER_AMBIGUOUS";
+        const orderLabel = clean(item.order_status_label)
+          || (orderKnown ? "顺序明确" : "顺序待核对");
+        const basisCopy = orderKnown && clean(item.basis_record_ref)
+          ? `账本汇总依据：${escapeHtml(item.basis_record_ref)} · ${escapeHtml(recordMoment(item.last_trade_date, item.last_trade_time_label))} · ${escapeHtml(item.last_operation_label || "成交")}。尚未与持仓快照核对，不等于当前实际持仓。`
+          : "同日成交顺序待核对，因此未选择汇总依据；原始成交明细仍保留。";
+        return `<article class="summary-card" role="listitem">
+          <div class="summary-stock">
+            <strong>${escapeHtml(item.stock_name || item.symbol)}</strong>
+            <small>${escapeHtml(item.symbol)} · 共 ${item.trade_count} 笔成交</small>
+          </div>
+          <span class="record-status ${orderKnown ? "is-ready" : "is-warning"}">${escapeHtml(orderLabel)}</span>
+          <dl class="summary-facts">
+            ${factItem("成交账本剩余股数", shareCount(item.remaining_shares))}
+            ${factItem("成交账本平均成本", factValue(item.avg_cost, formatCost), feeNote(item.fee_complete ? "" : "不含未知费用"))}
+            ${factItem("最后操作日期", orderKnown ? (clean(item.last_trade_date) || "—") : "—")}
+          </dl>
+          <p class="summary-basis">${basisCopy}</p>
+          ${incompleteNote(orderAmbiguous ? "顺序待核对" : "", item.order_reasons)}
+          ${incompleteNote(item.incomplete_label, item.incomplete_reasons)}
+          ${incompleteNote(item.fee_label, item.fee_reasons)}
+        </article>`;
+      }).join("")
       : `<div class="empty-state compact">
         <strong>还没有可汇总的成交</strong>
         <p>保存操作记录后，这里按股票显示成交账本剩余股数和平均成本。</p>
@@ -555,6 +566,7 @@ import { screeningFreshness } from "./screening.js";
         </dl>
         ${incompleteNote(record.incomplete_label, (record.missing_fields || []).length ? [`缺少 ${(record.missing_fields || []).join("、")}`] : [])}
         <div class="record-evidence">
+          <p><strong>记录引用</strong>${escapeHtml(record.record_ref || "—")}</p>
           <p><strong>操作依据</strong>${escapeHtml(record.notes || "未记录")}</p>
           <p><strong>情绪</strong>${escapeHtml(record.emotion || "未记录")}</p>
         </div>
@@ -598,7 +610,8 @@ import { screeningFreshness } from "./screening.js";
   }
 
   // 回执不确定时唯一可信的判断方式：重新读取最近记录，按 request_id 核对是否已落库。
-  // 服务端每条记录都回传 request_id（source 去前缀），因此不需要新增接口或字段。
+  // 服务端每条手工记录都回传 request_id（source 去前缀）；
+  // 读取用的 record_ref 不替代幂等键，这段核对流程仍只看 request_id。
   async function reconcileTradeReceipt(requestId) {
     const payload = await requestJson(`${API.trades}?limit=50`);
     const saved = (payload.records || []).some(

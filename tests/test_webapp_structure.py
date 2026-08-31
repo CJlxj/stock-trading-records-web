@@ -1086,6 +1086,7 @@ class WebappStructureTests(unittest.TestCase):
             "record.realized_pnl",
             "record.operation_label",
             "record.trade_time_label",
+            "record.record_ref",
             "record.incomplete_label",
             "record.missing_fields",
         ):
@@ -1099,6 +1100,8 @@ class WebappStructureTests(unittest.TestCase):
             "item.avg_cost",
             "item.last_trade_date",
             "item.last_operation_label",
+            "item.order_status",
+            "item.basis_record_ref",
             "item.incomplete_label",
         ):
             self.assertIn(field, summary_flow)
@@ -1111,6 +1114,14 @@ class WebappStructureTests(unittest.TestCase):
         self.assertNotIn("当前剩余股数", summary_flow)
         self.assertNotIn("当前平均成本", summary_flow)
         self.assertIn("不等于当前实际持仓", summary_flow)
+        self.assertIn("ORDER_KNOWN", summary_flow)
+        self.assertIn("ORDER_AMBIGUOUS", summary_flow)
+        self.assertIn("顺序明确", summary_flow)
+        self.assertIn("顺序待核对", summary_flow)
+        self.assertIn("未选择汇总依据", summary_flow)
+        self.assertNotIn("来自最后一笔成交", summary_flow)
+        self.assertIn("列表位置仅用于稳定展示", self.html)
+        self.assertNotIn('name="record_ref"', self.html)
         # 费用未知必须传到汇总，并且数值旁边带限定语。
         self.assertIn("item.fee_complete", summary_flow)
         self.assertIn("item.fee_label", summary_flow)

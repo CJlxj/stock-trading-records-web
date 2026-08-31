@@ -3456,6 +3456,7 @@ textarea:hover {
   margin: 0;
   color: var(--text-muted);
   font-size: 12px;
+  overflow-wrap: anywhere;
 }
 
 .record-evidence p > strong {
@@ -3524,7 +3525,7 @@ textarea:hover {
   font-weight: 600;
 }
 
-/* 按股票汇总：与历史明细同一份事实，只是取最后一笔的结果 */
+/* 按股票汇总：与历史明细同一份事实，顺序可确认时才选择依据记录。 */
 .summary-list {
   display: grid;
   gap: 10px;
@@ -3551,6 +3552,7 @@ textarea:hover {
   font-weight: 600;
 }
 
+.summary-card > .summary-facts,
 .summary-card > .summary-basis,
 .summary-card > .record-incomplete {
   grid-column: 1 / -1;
@@ -3558,6 +3560,7 @@ textarea:hover {
 
 .summary-basis {
   margin: 0;
+  overflow-wrap: anywhere;
 }
 
 /* ==========================================================================
@@ -4681,6 +4684,11 @@ textarea:hover {
 
   .summary-card {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .summary-card > .record-status {
+    grid-column: 1;
+    width: max-content;
   }
 
   .modal {

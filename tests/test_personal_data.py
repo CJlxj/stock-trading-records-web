@@ -276,12 +276,90 @@ class PersonalDataTests(unittest.TestCase):
             self.assertEqual("历史数据不完整", summary["incomplete_label"])
             self.assertIn(
                 "同一天有成交没有记录成交时间，先后顺序无法确认",
-                summary["incomplete_reasons"],
+                summary["order_reasons"],
             )
+            self.assertEqual("ORDER_AMBIGUOUS", summary["order_status"])
             for record in listed["records"]:
                 self.assertIsNone(record["remaining_shares"])
                 self.assertIsNone(record["avg_cost_after_trade"])
                 self.assertEqual("未归类", record["operation_label"])
+
+    def test_trade_import_reuses_a_source_trade_number_as_record_ref(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            import_personal_data(
+                root,
+                {
+                    "kind": "trades",
+                    "mode": "commit",
+                    "filename": "带成交编号.csv",
+                    "csv_text": (
+                        "成交编号,成交日期,成交时间,证券代码,买卖方向,成交价格,成交数量\n"
+                        "broker-trade-001,2026-07-10,09:31,600760,买入,44.5,200\n"
+                        "broker-trade-002,2026-07-11,14:00,600760,卖出,45.5,100\n"
+                    ),
+                },
+            )
+            stored = pd.read_csv(
+                root / "records" / "my_trades.csv", dtype=str, keep_default_na=False
+            )
+            listed = list_trade_records(root)
+
+            self.assertEqual(
+                ["broker-trade-001", "broker-trade-002"],
+                stored["record_ref"].tolist(),
+            )
+            self.assertEqual(
+                {"broker-trade-001", "broker-trade-002"},
+                {record["record_ref"] for record in listed["records"]},
+            )
+            self.assertTrue(all(record["request_id"] == "" for record in listed["records"]))
+
+    def test_trade_import_without_source_numbers_persists_distinct_local_refs(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            payload = {
+                "kind": "trades",
+                "filename": "无成交编号.csv",
+                "csv_text": (
+                    "成交日期,成交时间,证券代码,买卖方向,成交价格,成交数量\n"
+                    "2026-07-10,09:31,600760,买入,44.5,200\n"
+                    "2026-07-10,09:31,600760,买入,44.5,200\n"
+                ),
+            }
+            preview = import_personal_data(root, {**payload, "mode": "preview"})
+            self.assertEqual([None, None], [row["record_ref"] for row in preview["preview"]])
+            self.assertFalse((root / "records" / "my_trades.csv").exists())
+
+            import_personal_data(root, {**payload, "mode": "commit"})
+            stored = pd.read_csv(
+                root / "records" / "my_trades.csv", dtype=str, keep_default_na=False
+            )
+            first_refs = stored["record_ref"].tolist()
+            second_refs = [record["record_ref"] for record in list_trade_records(root)["records"]]
+
+            self.assertEqual(2, len(set(first_refs)))
+            self.assertTrue(all(ref.startswith("import-") for ref in first_refs))
+            self.assertEqual(set(first_refs), set(second_refs))
+
+    def test_trade_import_rejects_duplicate_source_trade_numbers(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            with self.assertRaisesRegex(PersonalDataError, "成交编号不能重复"):
+                import_personal_data(
+                    root,
+                    {
+                        "kind": "trades",
+                        "mode": "commit",
+                        "filename": "重复成交编号.csv",
+                        "csv_text": (
+                            "成交编号,成交日期,证券代码,买卖方向,成交价格,成交数量\n"
+                            "duplicate-001,2026-07-10,600760,买入,44.5,200\n"
+                            "duplicate-001,2026-07-11,600760,卖出,45.5,100\n"
+                        ),
+                    },
+                )
+            self.assertFalse((root / "records" / "my_trades.csv").exists())
 
     def test_status_reports_missing_and_empty_trade_ledger_separately(self):
         with tempfile.TemporaryDirectory() as temp_dir:

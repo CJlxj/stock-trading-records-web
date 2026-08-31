@@ -32,12 +32,16 @@ from tests.panel_scenario_fixture import (
     SCENARIO_TRADES,
     SECONDARY_REJECT_SYMBOL,
     SECONDARY_RULE_REF,
+    TIME_ORDER_AMBIGUOUS,
+    TIME_ORDER_AMBIGUOUS_DATE,
+    TIME_ORDER_AMBIGUOUS_TRADES,
     LEDGER_INCOMPLETE,
     READY_CURRENT_FLOW,
     ZERO_CANDIDATE,
     ZERO_CANDIDATE_RULE_REFS,
     build_ledger_incomplete,
     build_ready_current_flow,
+    build_time_order_ambiguous,
     build_zero_candidate,
     scenario_day_frames,
     screening_rows_by_symbol,
@@ -646,6 +650,86 @@ class LedgerIncompleteTests(unittest.TestCase):
             [CANDIDATE_SYMBOL],
             [summary["symbol"] for summary in self.listed["symbol_summaries"]],
         )
+
+    def test_field_incompleteness_does_not_make_the_trade_order_ambiguous(self):
+        summary = self.listed["symbol_summaries"][0]
+        self.assertFalse(summary["complete"])
+        self.assertEqual("历史数据不完整", summary["incomplete_label"])
+        self.assertEqual("ORDER_KNOWN", summary["order_status"])
+        self.assertEqual("顺序明确", summary["order_status_label"])
+        self.assertEqual("scenario-reduce-0003", summary["basis_record_ref"])
+
+
+class TimeOrderAmbiguousTests(unittest.TestCase):
+    """功能 1.2 增量场景：完整链路中只有同日成交顺序无法确认。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls._context = tempfile.TemporaryDirectory()
+        cls.scenario = build_time_order_ambiguous(cls._context.name)
+        cls.root = cls.scenario["root"]
+        cls.listed = list_trade_records(cls.root)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._context.cleanup()
+
+    def test_both_original_trade_facts_are_saved_and_have_unique_refs(self):
+        same_day = [
+            record
+            for record in self.listed["records"]
+            if record["trade_date"] == TIME_ORDER_AMBIGUOUS_DATE
+        ]
+        self.assertEqual(2, len(same_day))
+        self.assertEqual(
+            {trade["request_id"] for trade in TIME_ORDER_AMBIGUOUS_TRADES},
+            {record["record_ref"] for record in same_day},
+        )
+        self.assertEqual(2, len({record["record_ref"] for record in same_day}))
+        self.assertEqual(
+            {"09:40", "未记录"},
+            {record["trade_time_label"] for record in same_day},
+        )
+        self.assertEqual({"BUY", "SELL"}, {record["side"] for record in same_day})
+        self.assertEqual({51.2, 52.1}, {record["price"] for record in same_day})
+        self.assertEqual({100, 50}, {record["shares"] for record in same_day})
+
+    def test_summary_marks_order_ambiguous_and_selects_no_basis(self):
+        summary = self.listed["symbol_summaries"][0]
+        self.assertEqual(TIME_ORDER_AMBIGUOUS, self.scenario["scenario"])
+        self.assertEqual("ORDER_AMBIGUOUS", summary["order_status"])
+        self.assertEqual("顺序待核对", summary["order_status_label"])
+        self.assertIsNone(summary["basis_record_ref"])
+        self.assertIsNone(summary["remaining_shares"])
+        self.assertIsNone(summary["avg_cost"])
+        self.assertIsNone(summary["last_trade_date"])
+        self.assertIsNone(summary["last_trade_time"])
+        self.assertIsNone(summary["last_operation_label"])
+        self.assertEqual(5, self.listed["count"])
+
+    def test_screening_and_rule_results_are_unchanged(self):
+        rows = screening_rows_by_symbol(self.scenario["screening"])
+        self.assertEqual(
+            [CANDIDATE_SYMBOL],
+            [symbol for symbol, row in rows.items() if row["final_candidate"]],
+        )
+        self.assertTrue(RuleSetStore(self.root).active())
+
+    def test_scenario_repeats_identically_in_a_fresh_root(self):
+        def result(scenario: dict) -> dict:
+            listed = list_trade_records(scenario["root"])
+            summary = listed["symbol_summaries"][0]
+            return {
+                "refs": sorted(record["record_ref"] for record in listed["records"]),
+                "order": summary["order_status"],
+                "basis": summary["basis_record_ref"],
+                "count": listed["count"],
+            }
+
+        first = result(self.scenario)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            second = result(build_time_order_ambiguous(temp_dir))
+        self.assertEqual(first, second)
 
 
 class FirstVersionScenarioSuiteTests(unittest.TestCase):
