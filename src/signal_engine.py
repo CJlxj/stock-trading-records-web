@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Optional
 
@@ -11,22 +12,42 @@ import yaml
 from src.rules.registry import RuleRegistry
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+# 出厂规则定义随代码走：出厂框架由项目发布了哪些规则决定，与任何实例的运行目录无关。
+# 刻意不叫 PROJECT_ROOT——它只用于读版本化的 rules/catalog/builtin/，
+# 绝不用于读实例数据（用户规则库、行情、成交、历史）。读实例数据的一律显式传根。
+SHIPPED_RULES_ROOT = Path(__file__).resolve().parents[1]
 
 
-def _builtin_catalog() -> list[dict[str, Any]]:
+@lru_cache(maxsize=None)
+def _shipped_scored_catalog(root_key: str) -> tuple[dict[str, Any], ...]:
     # The legacy default framework is defined by the rules the project ships,
     # not by whatever the user's library currently holds — editing or deleting
     # a library rule must not silently redefine the shipped default.
-    return [
+    return tuple(
         item
-        for item in RuleRegistry(PROJECT_ROOT).factory_definitions()
+        for item in RuleRegistry(root_key).factory_definitions()
         if item.get("kind") == "scored"
-    ]
+    )
 
 
-CANDIDATE_RULE_CATALOG: list[dict[str, Any]] = _builtin_catalog()
-CATALOG_BY_ID = {item["id"]: item for item in CANDIDATE_RULE_CATALOG}
+def candidate_rule_catalog(
+    shipped_root: str | Path | None = None,
+) -> list[dict[str, Any]]:
+    """出厂候选规则定义。
+
+    惰性读取并按根缓存：import 本模块不再做任何文件 I/O，
+    因此不需要靠改写模块全局来让它读别的目录。
+    """
+    key = str(Path(shipped_root) if shipped_root is not None else SHIPPED_RULES_ROOT)
+    return [dict(item) for item in _shipped_scored_catalog(key)]
+
+
+def candidate_catalog_by_id(
+    shipped_root: str | Path | None = None,
+) -> dict[str, dict[str, Any]]:
+    return {item["id"]: item for item in candidate_rule_catalog(shipped_root)}
+
+
 DEFAULT_ACTIVE_RULES = [
     "close_above_ma20",
     "close_above_ma60",
@@ -39,21 +60,6 @@ DEFAULT_ACTIVE_RULES = [
     "not_over_extended",
     "atr_not_high",
 ]
-
-
-def _default_candidate_groups(
-    catalog: list[dict[str, Any]] | None = None,
-) -> dict[str, dict[str, Any]]:
-    groups: dict[str, dict[str, Any]] = {}
-    for item in catalog or CANDIDATE_RULE_CATALOG:
-        group = groups.setdefault(
-            item["group"], {"label": item.get("group_label", item["group"]), "checks": []}
-        )
-        group["checks"].append(item["id"])
-    return groups
-
-
-DEFAULT_CANDIDATE_GROUPS = _default_candidate_groups()
 
 
 @dataclass
@@ -95,18 +101,15 @@ def safe_bool(value: Any) -> bool:
     return bool(value)
 
 
-def candidate_rule_catalog() -> list[dict[str, Any]]:
-    return [dict(item) for item in CANDIDATE_RULE_CATALOG]
-
-
 def active_candidate_rules(rules: dict[str, Any]) -> list[str]:
     configured = rules.get("candidate_framework", {}).get("active_rules")
     if not isinstance(configured, list):
         return list(DEFAULT_ACTIVE_RULES)
+    catalog = candidate_catalog_by_id()
     unique: list[str] = []
     for value in configured:
         rule_id = str(value)
-        if rule_id in CATALOG_BY_ID and rule_id not in unique:
+        if rule_id in catalog and rule_id not in unique:
             unique.append(rule_id)
     return unique or list(DEFAULT_ACTIVE_RULES)
 
@@ -118,7 +121,7 @@ def candidate_framework_diagnostics(
     active_rules_override: list[str] | None = None,
     framework_override: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    catalog = catalog_by_id or CATALOG_BY_ID
+    catalog = catalog_by_id or candidate_catalog_by_id()
     framework = framework_override or rules.get("candidate_framework", {})
     configured = (
         active_rules_override
@@ -404,13 +407,16 @@ def evaluate_latest(
     entry_price: Optional[float] = None,
     market_context: str = "unknown",
     *,
-    registry: RuleRegistry | None = None,
+    registry: RuleRegistry,
     rule_set: dict[str, Any] | None = None,
     resolved_rule_set: dict[str, list[dict[str, Any]]] | None = None,
 ) -> SignalResult:
+    # registry 必须由调用方显式给出：它读的是**某个实例**的可编辑规则库
+    # （rules/catalog/user/、rules/registry_state.yaml）。以前这里在缺省时
+    # 回退到代码所在目录，等于悄悄拿开发者自己的规则库去评估别人的实例，
+    # 测试也只能靠改写模块全局来绕开。现在缺参数会直接报错，不会静默走错根。
     if rules is None:
         rules = load_rules()
-    registry = registry or RuleRegistry(PROJECT_ROOT)
     valid = latest_valid_rows(df)
     latest = valid.iloc[-1]
     explicit_rule_set = rule_set is not None

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from datetime import datetime
+from datetime import date, datetime
 from http import HTTPStatus
 import tempfile
 import unittest
@@ -370,6 +370,30 @@ class RuleLifecycleRegressionTests(unittest.TestCase):
 
 
 class ScreeningCoordinatorRegressionTests(unittest.TestCase):
+    def test_preflight_and_run_reuse_the_same_reference_date(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            coordinator = ScreeningCoordinator(root)
+            fixed_reference_date = date(2026, 7, 24)
+
+            with patch("src.screening.engine.date") as clock:
+                clock.today.return_value = fixed_reference_date
+                with patch(
+                    "src.screening.engine.screen_universe",
+                    return_value=_stored_result("fixed-reference-date"),
+                ) as screen:
+                    preflight = coordinator.preflight({})
+                    coordinator.run(preflight["preflight_id"])
+
+            clock.today.assert_called_once_with()
+            self.assertEqual(2, screen.call_count)
+            self.assertTrue(
+                all(
+                    call.kwargs.get("today") == fixed_reference_date
+                    for call in screen.call_args_list
+                )
+            )
+
     def test_preflight_reports_blocking_state_and_duplicate_fingerprint(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

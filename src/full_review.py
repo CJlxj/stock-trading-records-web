@@ -20,6 +20,7 @@ from src.io_loader import (
 )
 from src.position_sizer import classify_position, suggest_next_trade_capacity
 from src.personal_data import personal_data_status
+from src.rules.registry import RuleRegistry
 from src.selection_engine import evaluate_selection
 from src.signal_engine import evaluate_latest, load_rules
 from src.stock_library import local_stock_name_map
@@ -535,6 +536,8 @@ def run_full_review(payload: dict[str, Any], project_root: str | Path) -> dict[s
         rules=rules,
         entry_price=signal_entry_price,
         market_context=market_context,
+        # 显式给出本次复盘所属实例的规则库，不再让 signal_engine 回退到代码所在目录。
+        registry=RuleRegistry(root),
     )
     latest = signal.latest
     selection = evaluate_selection(market_df, symbol, stock_name, rules)

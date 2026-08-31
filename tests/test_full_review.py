@@ -9,10 +9,10 @@ import yaml
 
 import pandas as pd
 
-import src.signal_engine as signal_engine
 from src.full_review import get_bootstrap, run_full_review
 from src.rules.simple_editor import ensure_rule_catalog_seeded
 from tests.market_fixture import sample_ohlcv
+from tests.panel_scenario_fixture import build_empty_first_run
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -33,8 +33,6 @@ class FullReviewTests(unittest.TestCase):
             cls.review_root / "rules" / "catalog" / "builtin",
         )
         ensure_rule_catalog_seeded(cls.review_root)
-        cls.original_signal_project_root = signal_engine.PROJECT_ROOT
-        signal_engine.PROJECT_ROOT = cls.review_root
         config_dir = cls.review_root / "config"
         config_dir.mkdir(parents=True)
         rules = yaml.safe_load((PROJECT_ROOT / "config" / "strategy_rules.yaml").read_text(encoding="utf-8"))
@@ -60,7 +58,6 @@ class FullReviewTests(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls) -> None:
-        signal_engine.PROJECT_ROOT = cls.original_signal_project_root
         cls.review_root_context.cleanup()
 
     def fresh_payload(self, **overrides):
@@ -82,8 +79,13 @@ class FullReviewTests(unittest.TestCase):
         return payload
 
     def test_bootstrap_starts_without_packaged_personal_symbols(self):
-        bootstrap = get_bootstrap(PROJECT_ROOT)
-        self.assertEqual([], bootstrap["symbols"])
+        # 用共享空实例断言「首发不自带个人股票」。原先直接读真实 PROJECT_ROOT，
+        # 开发 worktree 里 Git 忽略的本地行情会让它失败——那是测试隔离问题，
+        # 不是产品行为问题。空实例与本地数据是否存在无关。
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = build_empty_first_run(temp_dir)["root"]
+            bootstrap = get_bootstrap(root)
+            self.assertEqual([], bootstrap["symbols"])
 
     def test_bootstrap_prefers_latest_day_close_and_trade_fallbacks(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -226,13 +228,14 @@ class FullReviewTests(unittest.TestCase):
 
     def test_selection_rules_gate_plan_discussion(self):
         with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            config_dir = root / "config"
-            config_dir.mkdir(parents=True)
-            shutil.copy(PROJECT_ROOT / "config" / "strategy_rules.yaml", config_dir / "strategy_rules.yaml")
-            rules = yaml.safe_load((config_dir / "strategy_rules.yaml").read_text(encoding="utf-8"))
+            # 用共享空实例做底：它带齐正式启动必需的配置与规则库。
+            # 以前这里只放一份 config 就能跑通，仅仅是因为 evaluate_latest 在缺
+            # registry 时会回退到代码所在目录的规则库——那正是本次重构消除的串根读取。
+            root = build_empty_first_run(temp_dir)["root"]
+            config_path = root / "config" / "strategy_rules.yaml"
+            rules = yaml.safe_load(config_path.read_text(encoding="utf-8"))
             rules["selection_rules"]["max_price"] = 10
-            (config_dir / "strategy_rules.yaml").write_text(
+            config_path.write_text(
                 yaml.safe_dump(rules, allow_unicode=True, sort_keys=False), encoding="utf-8"
             )
             result = run_full_review(self.fresh_payload(), root)

@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pandas as pd
 
+import src.signal_engine as signal_engine
 from src.indicators import add_indicators
 from src.rules.registry import RuleRegistry
 from src.rules.simple_editor import ensure_rule_catalog_seeded
@@ -26,9 +27,10 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 class SignalEngineTests(unittest.TestCase):
     """默认框架的判定必须只由出厂规则决定。
 
-    ``evaluate_latest`` 缺省会向 ``RuleRegistry(PROJECT_ROOT)`` 取当前生效版本，
-    也就是开发机上那份可以随时被编辑的规则库。这里统一注入一个只装了出厂规则的
-    临时注册表，测试结果才不会随本机改过哪条规则而漂移。
+    ``evaluate_latest`` 现在**必须**由调用方显式传入 ``registry``——它读的是某个
+    实例的可编辑规则库。以前缺省会回退到 ``RuleRegistry(PROJECT_ROOT)``，
+    也就是开发机上那份随时可被编辑的规则库，测试结果会随本机改过哪条规则而漂移。
+    这里统一注入一个只装了出厂规则的临时注册表。
     """
 
     @classmethod
@@ -236,3 +238,63 @@ class SignalEngineTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SignalEngineRootIsolationTests(unittest.TestCase):
+    """锁定「实例数据必须显式传根、出厂定义随代码走」这条边界。
+
+    重构前：``src/signal_engine.py`` 有模块级 ``PROJECT_ROOT``，
+    ``evaluate_latest`` 在缺 ``registry`` 时回退去读它，等于拿代码所在目录的
+    用户规则库评估别人的实例；出厂目录还在 import 时就被读掉，
+    想换根只能改写模块全局（``tests/test_full_review.py`` 当年正是这么做的）。
+    """
+
+    def test_evaluate_latest_requires_an_explicit_rule_registry(self):
+        # 少传 registry 必须当场报错，而不是静默去读代码所在目录的规则库。
+        frame = add_indicators(sample_ohlcv().assign(date=lambda f: pd.to_datetime(f["date"])))
+        with self.assertRaises(TypeError):
+            evaluate_latest(frame, rules=load_rules())
+
+    def test_module_keeps_no_instance_root_global(self):
+        # 不允许再出现「实例根」形态的模块级全局，否则又会有人去 monkeypatch 它。
+        self.assertFalse(hasattr(signal_engine, "PROJECT_ROOT"))
+        self.assertTrue(hasattr(signal_engine, "SHIPPED_RULES_ROOT"))
+
+    def test_importing_the_module_reads_no_rule_catalog(self):
+        # 出厂目录改成惰性读取：import 期不做规则目录 I/O。
+        source = Path(signal_engine.__file__).read_text(encoding="utf-8")
+        catalog_call = "_shipped_scored_catalog("
+        module_level_calls = [
+            line
+            for line in source.splitlines()
+            if catalog_call in line and not line.startswith((" ", "\t", "@", "def "))
+        ]
+        self.assertEqual([], module_level_calls)
+
+    def test_shipped_catalog_is_scoped_to_the_root_it_is_given(self):
+        # 出厂定义按根取，且结果可缓存复用；不同根给出各自的出厂内容。
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            builtin_dir = root / "rules" / "catalog" / "builtin"
+            builtin_dir.mkdir(parents=True)
+            shutil.copy(
+                PROJECT_ROOT / "rules" / "catalog" / "builtin" / "candidate_rules.yaml",
+                builtin_dir / "candidate_rules.yaml",
+            )
+            scoped = signal_engine.candidate_rule_catalog(root)
+            shipped = signal_engine.candidate_rule_catalog()
+
+            self.assertEqual(
+                {item["id"] for item in shipped}, {item["id"] for item in scoped}
+            )
+            # 返回的是副本：调用方改动不会污染缓存。
+            scoped[0]["id"] = "mutated"
+            self.assertNotEqual(
+                "mutated", signal_engine.candidate_rule_catalog(root)[0]["id"]
+            )
+
+    def test_catalog_by_id_matches_the_catalog(self):
+        by_id = signal_engine.candidate_catalog_by_id()
+        catalog = signal_engine.candidate_rule_catalog()
+        self.assertEqual({item["id"] for item in catalog}, set(by_id))
+        self.assertEqual(len(catalog), len(by_id))
