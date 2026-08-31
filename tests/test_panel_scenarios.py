@@ -732,14 +732,15 @@ class TimeOrderAmbiguousTests(unittest.TestCase):
         self.assertEqual(first, second)
 
 
-class FirstVersionScenarioSuiteTests(unittest.TestCase):
-    """第一版收口：四个场景可独立构建、互不共享状态、不污染开发仓库。"""
+class FeatureOneScenarioSuiteTests(unittest.TestCase):
+    """Feature 1 收口：五个场景可独立构建、互不共享状态、不污染开发仓库。"""
 
     BUILDERS = (
         (EMPTY_FIRST_RUN, build_empty_first_run),
         (READY_CURRENT_FLOW, build_ready_current_flow),
         (ZERO_CANDIDATE, build_zero_candidate),
         (LEDGER_INCOMPLETE, build_ledger_incomplete),
+        (TIME_ORDER_AMBIGUOUS, build_time_order_ambiguous),
     )
 
     @staticmethod
@@ -755,7 +756,7 @@ class FirstVersionScenarioSuiteTests(unittest.TestCase):
             ) if target.exists() else []
         return snapshot
 
-    def test_all_four_scenarios_build_independently(self):
+    def test_all_five_scenarios_build_independently(self):
         for name, builder in self.BUILDERS:
             with self.subTest(scenario=name):
                 with tempfile.TemporaryDirectory() as temp_dir:
@@ -769,7 +770,7 @@ class FirstVersionScenarioSuiteTests(unittest.TestCase):
         try:
             for (name, builder), context in zip(self.BUILDERS, contexts):
                 roots.append(Path(builder(context.name)["root"]).resolve())
-            # 四个根两两不同，且互不为对方的子目录。
+            # 五个根两两不同，且互不为对方的子目录。
             self.assertEqual(len(roots), len({str(root) for root in roots}))
             for first in roots:
                 for second in roots:
@@ -795,13 +796,14 @@ class FirstVersionScenarioSuiteTests(unittest.TestCase):
         self.assertEqual(before, self._repo_snapshot())
 
     def test_scenarios_are_discovered_by_the_full_test_run(self):
-        # 收口检查：四个场景都在本模块里有专属测试类，不会被遗漏。
+        # 收口检查：五个场景都在本模块里有专属测试类，不会被遗漏。
         module = sys.modules[__name__]
         covered = {
             EMPTY_FIRST_RUN: PanelScenarioIsolationTests,
             READY_CURRENT_FLOW: ReadyCurrentFlowTests,
             ZERO_CANDIDATE: ZeroCandidateTests,
             LEDGER_INCOMPLETE: LedgerIncompleteTests,
+            TIME_ORDER_AMBIGUOUS: TimeOrderAmbiguousTests,
         }
         for name, case in covered.items():
             self.assertTrue(issubclass(case, unittest.TestCase), name)

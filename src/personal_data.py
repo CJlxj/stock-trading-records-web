@@ -573,6 +573,13 @@ def _assign_trade_record_refs(rows: list[dict[str, str]]) -> bool:
     return changed
 
 
+def read_trade_rows(path: str | Path) -> list[dict[str, str]]:
+    """按原始字符串读取成交，并在内存中补齐兼容引用；绝不写回文件。"""
+    rows = _trade_rows(Path(path))
+    _assign_trade_record_refs(rows)
+    return rows
+
+
 def _normalize_trade_time(value: Any) -> str:
     """把成交时间统一成 HH:MM:SS；识别不了就留空，由调用方决定报错还是按未记录处理。"""
     text = re.sub(r"[\s　]+", "", str(value or ""))
@@ -1186,6 +1193,27 @@ def _trade_symbol_summaries(
     return summaries
 
 
+def summarize_trade_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """让其他只读消费者复用操作记录的唯一账本与顺序口径。
+
+    调用方常从 pandas DataFrame 传入带 NaN 的行。这里先复制并把缺失值恢复为
+    台账使用的空字符串，再在内存中补兼容引用；不会写回成交文件。
+    """
+    normalized_rows: list[dict[str, str]] = []
+    for source_row in rows:
+        normalized: dict[str, str] = {}
+        for key, value in source_row.items():
+            try:
+                missing = value is None or bool(pd.isna(value))
+            except (TypeError, ValueError):
+                missing = value is None
+            normalized[str(key)] = "" if missing else str(value).strip()
+        normalized_rows.append(normalized)
+    _assign_trade_record_refs(normalized_rows)
+    fee_chain = _trade_fee_chain(normalized_rows)
+    return _trade_symbol_summaries(normalized_rows, fee_chain)
+
+
 def list_trade_records(
     project_root: str | Path,
     *,
@@ -1195,8 +1223,7 @@ def list_trade_records(
     root = Path(project_root)
     normalized_symbol = _normalize_symbol(symbol) if symbol else None
     safe_limit = max(1, min(int(limit), 200))
-    rows = _trade_rows(root / TARGET_FILES["trades"])
-    _assign_trade_record_refs(rows)
+    rows = read_trade_rows(root / TARGET_FILES["trades"])
     if normalized_symbol:
         rows = [row for row in rows if row.get("symbol") == normalized_symbol]
     rows.sort(key=_trade_display_sort_key, reverse=True)

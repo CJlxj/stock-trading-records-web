@@ -9,10 +9,17 @@ import yaml
 
 import pandas as pd
 
-from src.full_review import get_bootstrap, run_full_review
+from src.full_review import _record_summary, get_bootstrap, run_full_review
+from src.personal_data import list_trade_records
 from src.rules.simple_editor import ensure_rule_catalog_seeded
+from src.trade_analyzer import summarize_symbol
 from tests.market_fixture import sample_ohlcv
-from tests.panel_scenario_fixture import build_empty_first_run
+from tests.panel_scenario_fixture import (
+    CANDIDATE_SYMBOL,
+    build_empty_first_run,
+    build_ledger_incomplete,
+    build_time_order_ambiguous,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -115,6 +122,204 @@ class FullReviewTests(unittest.TestCase):
             self.assertEqual(48.5, config["defaults"]["avg_cost"])
             self.assertEqual(51.23, config["defaults"]["current_price"])
             self.assertEqual("2026-06-12", config["latest_day"]["date"])
+
+    def test_trade_summary_never_uses_csv_order_as_business_order(self):
+        rows = [
+            {
+                "trade_date": "2026-04-01",
+                "trade_time": "",
+                "symbol": "600000.SH",
+                "side": "BUY",
+                "price": 10,
+                "shares": 1000,
+                "gross_amount": 10000,
+                "remaining_shares": 1000,
+                "avg_cost_after_trade": 10,
+                "realized_pnl": 0,
+                "record_ref": "order-buy-0001",
+            },
+            {
+                "trade_date": "2026-04-01",
+                "trade_time": "",
+                "symbol": "600000.SH",
+                "side": "SELL",
+                "price": 11,
+                "shares": 1000,
+                "gross_amount": 11000,
+                "remaining_shares": 0,
+                "avg_cost_after_trade": 0,
+                "realized_pnl": 1000,
+                "record_ref": "order-sell-0002",
+            },
+        ]
+        seen = []
+        for ordered in (rows, list(reversed(rows))):
+            summary = summarize_symbol(
+                pd.DataFrame(ordered), "600000.SH", latest_price=12
+            )
+            seen.append(summary)
+            self.assertEqual("ORDER_AMBIGUOUS", summary["order_status"])
+            self.assertFalse(summary["ledger_complete"])
+            self.assertIsNone(summary["remaining_shares"])
+            self.assertIsNone(summary["avg_cost"])
+            self.assertIsNone(summary["basis_record_ref"])
+        self.assertEqual(seen[0]["remaining_shares"], seen[1]["remaining_shares"])
+        self.assertEqual(seen[0]["avg_cost"], seen[1]["avg_cost"])
+
+    def test_closed_trade_summary_needs_no_fake_price_for_zero_position(self):
+        summary = summarize_symbol(
+            pd.DataFrame(
+                [
+                    {
+                        "trade_date": "2026-04-01",
+                        "trade_time": "09:30",
+                        "symbol": "600000.SH",
+                        "side": "BUY",
+                        "price": 10,
+                        "shares": 1000,
+                        "gross_amount": 10000,
+                        "remaining_shares": 1000,
+                        "avg_cost_after_trade": 10,
+                        "realized_pnl": 0,
+                        "record_ref": "close-buy-0001",
+                    },
+                    {
+                        "trade_date": "2026-04-02",
+                        "trade_time": "14:30",
+                        "symbol": "600000.SH",
+                        "side": "SELL",
+                        "price": 11,
+                        "shares": 1000,
+                        "gross_amount": 11000,
+                        "remaining_shares": 0,
+                        "avg_cost_after_trade": 0,
+                        "realized_pnl": 1000,
+                        "record_ref": "close-sell-0002",
+                    },
+                ]
+            ),
+            "600000.SH",
+        )
+        self.assertEqual("ORDER_KNOWN", summary["order_status"])
+        self.assertEqual(0, summary["remaining_shares"])
+        self.assertEqual(0.0, summary["avg_cost"])
+        self.assertEqual(0.0, summary["market_value"])
+        self.assertIsNone(summary["latest_price_used"])
+        self.assertIsNone(summary["capacity"])
+
+    def test_bootstrap_keeps_ambiguous_trade_position_unknown(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            build_time_order_ambiguous(temp_dir)
+            config = next(
+                item
+                for item in get_bootstrap(temp_dir)["symbols"]
+                if item["symbol"] == CANDIDATE_SYMBOL
+            )
+            self.assertIsNone(config["defaults"]["position_shares"])
+            self.assertIsNone(config["defaults"]["avg_cost"])
+
+    def test_full_review_requires_independent_position_for_ambiguous_trades(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            build_time_order_ambiguous(temp_dir)
+            payload = self.fresh_payload(
+                symbol=CANDIDATE_SYMBOL,
+                stock_name="测试甲",
+                use_local_records=True,
+            )
+            payload.pop("position_shares")
+            with self.assertRaisesRegex(ValueError, "成交顺序待核对"):
+                run_full_review(payload, temp_dir)
+
+            result = run_full_review(
+                {
+                    **payload,
+                    "position_shares": 900,
+                    "avg_cost": 49.5,
+                },
+                temp_dir,
+            )
+            records = next(
+                section for section in result["sections"] if section["id"] == "records"
+            )
+            self.assertTrue(
+                any("成交顺序待核对" in item["text"] for item in records["items"])
+            )
+
+    def test_incomplete_ledger_never_becomes_zero_position_or_watchlist_cost(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = build_ledger_incomplete(temp_dir)["root"]
+            pd.DataFrame(
+                [
+                    {
+                        "symbol": CANDIDATE_SYMBOL,
+                        "stock_name": "测试甲",
+                        "entry_price": 88.88,
+                    }
+                ]
+            ).to_csv(root / "watchlist.csv", index=False)
+
+            config = next(
+                item
+                for item in get_bootstrap(root)["symbols"]
+                if item["symbol"] == CANDIDATE_SYMBOL
+            )
+            self.assertIsNone(config["defaults"]["position_shares"])
+            self.assertIsNone(config["defaults"]["avg_cost"])
+
+            payload = self.fresh_payload(
+                symbol=CANDIDATE_SYMBOL,
+                stock_name="测试甲",
+                use_local_records=True,
+            )
+            payload.pop("position_shares")
+            with self.assertRaisesRegex(ValueError, "历史数据不完整"):
+                run_full_review(payload, root)
+
+            result = run_full_review(
+                {**payload, "position_shares": 900},
+                root,
+            )
+            records = next(
+                section for section in result["sections"] if section["id"] == "records"
+            )
+            position = next(
+                section for section in result["sections"] if section["id"] == "position"
+            )
+            self.assertTrue(
+                any("历史数据不完整" in item["text"] for item in records["items"])
+            )
+            self.assertTrue(
+                any("持仓 900 股" in item["text"] for item in position["items"])
+            )
+            self.assertFalse(
+                any("成本 88.8800" in item["text"] for item in position["items"])
+            )
+
+    def test_legacy_basis_reference_is_identical_across_read_only_consumers(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            records_dir = root / "records"
+            records_dir.mkdir(parents=True)
+            target = records_dir / "my_trades.csv"
+            target.write_text(
+                "trade_date,trade_time,symbol,stock_name,side,price,shares,"
+                "gross_amount,fee,avg_cost_after_trade,realized_pnl,"
+                "remaining_shares,account_total_asset,source,notes\n"
+                "2026-04-01,09:30,600000.SH,测试股票,BUY,45.0000,100,"
+                "4500.00,5.00,45.0000,0.00,100,140000,legacy,\n",
+                encoding="utf-8",
+            )
+            before = target.read_bytes()
+
+            canonical = list_trade_records(
+                root, symbol="600000.SH", limit=1
+            )["symbol_summaries"][0]
+            first = _record_summary(root, "600000.SH", 46.0, True)
+            second = _record_summary(root, "600000.SH", 46.0, True)
+
+            self.assertEqual(canonical["basis_record_ref"], first["basis_record_ref"])
+            self.assertEqual(first["basis_record_ref"], second["basis_record_ref"])
+            self.assertEqual(before, target.read_bytes())
 
     def test_complete_review_has_required_ten_sections(self):
         result = run_full_review(self.fresh_payload(), self.review_root)
